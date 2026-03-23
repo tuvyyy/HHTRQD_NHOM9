@@ -1,0 +1,42 @@
+:root {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  /* ép app theo light để dashboard nhìn đúng */
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  background: #f6f7fb;
+  color: #111827;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+}
+
+body {
+  /* tuyệt đối KHÔNG center app bằng flex nữa */
+  overflow: hidden;       /* không cho cuộn trang */
+  background: #f6f7fb;
+}
+
+a { color: inherit; text-decoration: none; }
+button, input { font-family: inherit; }
+
+/* FIX DỒN QUA PHẢI (Vite template hay có max-width/padding cho #root) */
+#root{
+  max-width: none !important;
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-align: left !important;
+}

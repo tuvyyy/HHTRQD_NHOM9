@@ -1,0 +1,27 @@
+﻿# Environment / secrets
+.env*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+.venv/
+.venv_history_backup_20260317/
+
+# Node
+node_modules/
+dist/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Project artifacts
+recovery_reports/
+backend/tmp_report_text.txt
+frontend/.classnames_css.txt
