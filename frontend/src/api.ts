@@ -210,6 +210,48 @@ export async function aiForecast(payload: AiForecastReq) {
   return res.data as AiForecastRes;
 }
 
+export type AiChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+export type AiChatReq = {
+  messages: AiChatMessage[];
+  lat?: number;
+  lon?: number;
+  hours?: number;
+  weights?: Record<string, number>;
+  decision_date?: string;
+  ranking_source?: string;
+  district_rows?: Array<{
+    districtName: string;
+    rank: number;
+    score: number;
+    C1?: number;
+    C2?: number;
+    C3?: number;
+    C4?: number;
+  }>;
+  forecast_series?: Array<{
+    time: string;
+    risk_score_0_100: number;
+  }>;
+  provider?: string;
+  model?: string;
+  temperature?: number;
+};
+
+export type AiChatRes = {
+  provider: string;
+  model: string;
+  reply: string;
+};
+
+export async function aiChat(payload: AiChatReq) {
+  const res = await api.post("/api/ai/chat", payload);
+  return res.data as AiChatRes;
+}
+
 export async function geocodeReverse(
   payload: { lat: number; lon: number },
   config?: { signal?: AbortSignal }

@@ -31,46 +31,73 @@ export default function EarlyWarningCard({
       .slice(0, 5);
   }, [data]);
 
+  const staleNote = useMemo(() => {
+    if (!data?.timeOfMax) return "";
+    const parsed = new Date(String(data.timeOfMax));
+    if (!Number.isFinite(parsed.getTime())) return "";
+    if (parsed.getTime() < Date.now() - 60 * 60 * 1000) {
+      return "Dữ liệu forecast chưa mới; kết quả AI chỉ nên xem như hỗ trợ vận hành.";
+    }
+    return "";
+  }, [data]);
+
   return (
     <div className="card">
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-        <div style={{ fontWeight: 800, fontSize: 14 }}>Early Warning</div>
+        <div style={{ fontWeight: 800, fontSize: 14 }}>Nguy cơ ngắn hạn (AI hỗ trợ)</div>
         <button className="btn" onClick={onCheck} disabled={loading}>
-          {loading ? "Checking..." : "Check warning"}
+          {loading ? "Đang kiểm tra..." : "Cập nhật cảnh báo"}
         </button>
       </div>
 
-      {error && (
+      {error ? (
         <div style={{ marginTop: 10, color: "#ef4444", fontSize: 13 }}>
           {error}
         </div>
-      )}
+      ) : null}
 
-      {!data && !error && (
+      {!data && !error ? (
         <div style={{ marginTop: 10, color: "#6b7280", fontSize: 13 }}>
-          Chưa có dữ liệu cảnh báo. Bấm <b>Check warning</b>.
+          Chưa có dữ liệu cảnh báo. Bấm <b>Cập nhật cảnh báo</b>.
         </div>
-      )}
+      ) : null}
 
-      {data && (
+      {data ? (
         <div style={{ marginTop: 10 }}>
+          {staleNote ? (
+            <div
+              style={{
+                marginBottom: 8,
+                border: "1px solid #fca5a5",
+                background: "#fef2f2",
+                color: "#991b1b",
+                borderRadius: 10,
+                padding: "7px 9px",
+                fontSize: 12,
+                lineHeight: 1.4,
+              }}
+            >
+              {staleNote}
+            </div>
+          ) : null}
+
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <span style={badgeStyle(data.warning)}>
-              {data.warning ? "WARNING" : "SAFE"}
+              {data.warning ? "CẦN CHÚ Ý" : "ỔN ĐỊNH"}
             </span>
             <span style={{ fontSize: 13, color: "#374151" }}>
-              maxScore: <b>{data.maxScore}</b> ({data.maxLevel})
+              Mức nguy cơ ngắn hạn: <b>{data.maxLevel}</b> (điểm cao nhất: {data.maxScore})
             </span>
           </div>
 
           <div style={{ marginTop: 6, fontSize: 13, color: "#374151" }}>
-            timeOfMax: <b>{data.timeOfMax}</b>
+            Khung thời gian tham chiếu: <b>{data.timeOfMax}</b>
           </div>
           <div style={{ marginTop: 6, fontSize: 12, color: "#6b7280" }}>
-            reason: {data.reason}
+            Lý do chính: {data.reason}
           </div>
 
-          <div style={{ marginTop: 10, fontWeight: 700, fontSize: 13 }}>Top 5 hours</div>
+          <div style={{ marginTop: 10, fontWeight: 700, fontSize: 13 }}>Top 5 khung giờ cần theo dõi</div>
           <div style={{ marginTop: 6, display: "grid", gap: 6 }}>
             {top5.map((x) => (
               <div
@@ -92,7 +119,7 @@ export default function EarlyWarningCard({
             ))}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

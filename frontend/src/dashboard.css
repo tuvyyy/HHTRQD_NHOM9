@@ -1427,7 +1427,7 @@ th{
 }
 
 .drawer {
-  width: min(620px, 96vw);
+  width: min(920px, 99vw);
   height: 100%;
   background: #fff;
   border-left: 1px solid #dbe4f0;
@@ -1437,7 +1437,7 @@ th{
 }
 
 .drawerHeader {
-  padding: 12px;
+  padding: 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1445,13 +1445,30 @@ th{
 }
 
 .drawerTitle {
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 900;
 }
 
 .drawerBody {
-  padding: 12px;
+  padding: 14px;
   overflow: auto;
+}
+
+.drawerBody.aiDrawerBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.aiDrawerTop {
+  flex: 0 0 auto;
+}
+
+.aiDrawerChatWrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
 }
 
 .modalGrid {

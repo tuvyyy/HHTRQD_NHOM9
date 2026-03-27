@@ -40,7 +40,6 @@ import MapPicker, { type DistrictMapResultItem, type MapSourceStatus } from "./M
 import EarlyWarningCard from "./EarlyWarningCard";
 import AddressSearch from "./AddressSearch";
 import AiChatPanel from "./AiChatPanel";
-import RiskScoreChart from "./RiskScoreChart";
 import StationForecastPage from "./StationForecastPage";
 import {
   Bar,
@@ -471,10 +470,8 @@ export default function Dashboard() {
   const gridAbortRef = useRef<AbortController | null>(null);
 
   // ====== AI (M3 skeleton) ======
-  const [aiHorizon, setAiHorizon] = useState(24);
   const [aiForecastRes, setAiForecastRes] = useState<AiForecastRes | null>(null);
   const [aiForecastLoading, setAiForecastLoading] = useState(false);
-  const [aiForecastErr, setAiForecastErr] = useState<string | null>(null);
 
   // Chat UI moved to AiChatPanel (Ollama-backed)
 
@@ -1566,29 +1563,33 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function runAiForecast() {
+  async function runAiForecast(horizonHours = 24) {
     if (aiForecastLoading) return;
 
-    setAiForecastErr(null);
     setAiForecastLoading(true);
     try {
       const res = await aiForecast({
         lat,
         lon,
-        horizon_hours: aiHorizon,
+        horizon_hours: horizonHours,
         weights,
         threshold: 60,
         model: "openmeteo_baseline",
       });
       setAiForecastRes(res);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || String(e);
-      setAiForecastErr(msg);
       setAiForecastRes(null);
     } finally {
       setAiForecastLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (!aiDrawerOpen || !showAiPanel) return;
+    runAiForecast(24).catch(() => {});
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiDrawerOpen, showAiPanel, lat, lon]);
 
   // runAiChat removed (AiChatPanel owns conversation state)
 
@@ -1912,7 +1913,7 @@ export default function Dashboard() {
           InteractiveScore: Number(interactiveScore.toFixed(6)),
         };
       })
-      .sort((a, b) => a.InteractiveScore - b.InteractiveScore);
+      .sort((a, b) => b.InteractiveScore - a.InteractiveScore);
     return rows.map((it, idx) => ({ ...it, InteractiveRank: idx + 1 }));
   }, [ahpResult, selectedDistrictIds, activeCriteria]);
   const criteriaWeightChartData = useMemo(
@@ -1998,6 +1999,82 @@ export default function Dashboard() {
     () => manualFinalRows.slice(0, 3).map((r) => String(r.DistrictName || "")).join(", "),
     [manualFinalRows]
   );
+  const aiChatDistrictRows = useMemo(() => {
+    const isScenarioPaint = districtResultPaint?.source === "policy-scenario";
+
+    if (manualFinalRows.length) {
+      return manualFinalRows.map((r) => ({
+        districtName: String(r.DistrictName || ""),
+        rank: Number(r.Rank || 0),
+        score: Number(r.Score || 0),
+        C1: Number(r.Details?.C1 || 0),
+        C2: Number(r.Details?.C2 || 0),
+        C3: Number(r.Details?.C3 || 0),
+        C4: Number(r.Details?.C4 || 0),
+      }));
+    }
+    if (isScenarioPaint && scenarioCompareItems.length) {
+      return [...scenarioCompareItems]
+        .sort((a, b) => Number(a.scenarioRank || 0) - Number(b.scenarioRank || 0))
+        .map((it) => ({
+          districtName: String(it.districtName || ""),
+          rank: Number(it.scenarioRank || 0),
+          score: Number(it.scenarioScore || 0),
+          C1: Number(it.criteriaValues?.C1 || 0),
+          C2: Number(it.criteriaValues?.C2 || 0),
+          C3: Number(it.criteriaValues?.C3 || 0),
+          C4: Number(it.criteriaValues?.C4 || 0),
+        }));
+    }
+    if (ahpResult?.items?.length) {
+      return [...ahpResult.items]
+        .map((it: any) => ({
+          districtName: String(it.DistrictName || ""),
+          rank: Number(it.Rank || 0),
+          score: Number(it.AHPScore ?? it.Score ?? it.InteractiveScore ?? 0),
+          C1: Number(it.C1 || 0),
+          C2: Number(it.C2 || 0),
+          C3: Number(it.C3 || 0),
+          C4: Number(it.C4 || 0),
+        }))
+        .sort((a, b) => {
+          const ar = Number(a.rank || 0);
+          const br = Number(b.rank || 0);
+          if (ar > 0 && br > 0) return ar - br;
+          return Number(b.score || 0) - Number(a.score || 0);
+        });
+    }
+    if (scenarioCompareItems.length) {
+      return [...scenarioCompareItems]
+        .sort((a, b) => Number(a.scenarioRank || 0) - Number(b.scenarioRank || 0))
+        .map((it) => ({
+          districtName: String(it.districtName || ""),
+          rank: Number(it.scenarioRank || 0),
+          score: Number(it.scenarioScore || 0),
+          C1: Number(it.criteriaValues?.C1 || 0),
+          C2: Number(it.criteriaValues?.C2 || 0),
+          C3: Number(it.criteriaValues?.C3 || 0),
+          C4: Number(it.criteriaValues?.C4 || 0),
+        }));
+    }
+    return [];
+  }, [manualFinalRows, districtResultPaint?.source, scenarioCompareItems, ahpResult?.items]);
+  const aiChatRankingSource = useMemo(() => {
+    if (manualFinalRows.length) return "AHP bước 4 (ma trận phương án)";
+    if (ahpResult?.items?.length) return "AHP lịch sử 13 quận";
+    if (scenarioCompareItems.length) return "Policy Scenario DSS";
+    return "Chưa có bảng xếp hạng";
+  }, [manualFinalRows.length, ahpResult?.items?.length, scenarioCompareItems.length]);
+  const aiChatDecisionDate = useMemo(() => {
+    const raw = String(
+      scenarioResult?.summary?.date ||
+        scenarioResult?.date ||
+        ahpResult?.date ||
+        histDate ||
+        ""
+    ).trim();
+    return raw;
+  }, [scenarioResult, ahpResult, histDate]);
   const mapModeLabel = useMemo(() => {
     if (!districtResultPaint) return "";
     const dateText = districtResultPaint.date || histDate;
@@ -2112,9 +2189,36 @@ export default function Dashboard() {
     const status = warning?.warning ? "Có tín hiệu cần chú ý" : "Chưa kích hoạt";
     const maxScore = warning?.maxScore !== undefined ? Number(warning.maxScore).toFixed(1) : "—";
     const maxLevel = warning?.maxLevel || "—";
-    return `Trạng thái: ${status} · maxScore: ${maxScore} · mức dự báo cao nhất: ${maxLevel}.`;
+    return `Trạng thái ngắn hạn: ${status} · điểm cao nhất: ${maxScore} · mức nguy cơ ngắn hạn: ${maxLevel}.`;
   }, [warning]);
-
+  const aiForecastFreshness = useMemo(() => {
+    const times: number[] = [];
+    const candidates = [
+      aiForecastRes?.time_of_max,
+      aiForecastRes?.current_time,
+      aiForecastRes?.series?.[aiForecastRes?.series.length - 1]?.time,
+    ].filter(Boolean) as string[];
+    for (const raw of candidates) {
+      const t = new Date(String(raw)).getTime();
+      if (Number.isFinite(t)) times.push(t);
+    }
+    if (!times.length) {
+      return {
+        isStale: true,
+        message:
+          "Dữ liệu forecast chưa mới, độ tin cậy giảm; chỉ dùng kết quả AI như hỗ trợ vận hành.",
+      };
+    }
+    const latest = Math.max(...times);
+    if (latest < Date.now() - 60 * 60 * 1000) {
+      return {
+        isStale: true,
+        message:
+          "Dữ liệu forecast chưa mới, độ tin cậy giảm; chỉ dùng kết quả AI như hỗ trợ vận hành.",
+      };
+    }
+    return { isStale: false, message: "" };
+  }, [aiForecastRes]);
   const stepStateClass = (step: CriteriaStepIndex) =>
     manualStep === step ? "current" : manualStep > step ? "done" : "locked";
   const stepFocusClass = (step: CriteriaStepIndex) => (activeCriteriaStep === step ? "active-step" : "inactive-step");
@@ -2646,7 +2750,7 @@ export default function Dashboard() {
                     setViewMode("ai");
                     setAiDrawerOpen(true);
                   }}
-                  title="Open AI drawer"
+                  title="Mở AI hỗ trợ cảnh báo ngắn hạn"
                 >
                   <span className="aiDot" aria-hidden="true" /> AI
                 </button>
@@ -2791,7 +2895,7 @@ export default function Dashboard() {
                     closeGuideModal();
                   }}
                 >
-                  Mở AI forecast/chat
+                  Mở AI hỗ trợ cảnh báo ngắn hạn
                 </button>
               </div>
             </div>
@@ -3465,83 +3569,24 @@ export default function Dashboard() {
         >
           <div className="drawer">
             <div className="drawerHeader">
-              <div className="drawerTitle">AI (Forecast + Chat)</div>
+              <div className="drawerTitle">AI hỗ trợ cảnh báo ngắn hạn</div>
               <button className="btn secondary" onClick={() => setAiDrawerOpen(false)}>
-                Close
+                Đóng
               </button>
             </div>
 
-            <div className="drawerBody">
-              <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
-                <div style={{ flex: 1 }}>
-                  <div className="label">Dự báo (6-24h)</div>
-                  <input
-                    className="input"
-                    type="number"
-                    min={6}
-                    max={24}
-                    value={aiHorizon}
-                    onChange={(e) => setAiHorizon(Number(e.target.value) || 24)}
-                  />
-                </div>
-                <button className="btn secondary" onClick={runAiForecast} disabled={aiForecastLoading}>
-                  {aiForecastLoading ? "Dang chay..." : "Forecast"}
-                </button>
-              </div>
-
-              {aiForecastErr ? <div style={{ fontSize: 11, color: "#b91c1c", marginTop: 6 }}>{aiForecastErr}</div> : null}
-
-              {aiForecastRes ? (
-                <div style={{ marginTop: 10 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12 }}>
-                    <div>
-                      Warning: <b>{aiForecastRes.warning ? "YES" : "NO"}</b>
-                    </div>
-                    <div style={{ color: "#6b7280" }}>
-                      max={aiForecastRes.max_risk_score} @ {aiForecastRes.time_of_max}
-                    </div>
-                  </div>
-
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, marginTop: 6 }}>
-                    <div style={{ color: "#6b7280" }}>
-                      Current:{" "}
-                      <b>
-                        {aiForecastRes.current_risk_score ?? "?"}{" "}
-                        {aiForecastRes.current_level ? `(${aiForecastRes.current_level})` : ""}
-                      </b>{" "}
-                      {aiForecastRes.current_time ? `@ ${aiForecastRes.current_time}` : ""}
-                    </div>
-                    <div style={{ color: "#6b7280" }}>
-                      Confidence:{" "}
-                      <b>
-                        {aiForecastRes.confidence_label ?? "?"}{" "}
-                        {typeof aiForecastRes.confidence_0_100 === "number" ? `(${aiForecastRes.confidence_0_100})` : ""}
-                      </b>
-                    </div>
-                  </div>
-
-                  <div
-                    style={{
-                      height: "clamp(160px, 22vh, 220px)",
-                      border: "1px solid #e5e7eb",
-                      borderRadius: 14,
-                      padding: 8,
-                      marginTop: 8,
-                    }}
-                  >
-                    <RiskScoreChart
-                      forecast={aiForecastRes.series.map((p) => ({ time: p.time, risk_score_0_100: p.risk_score_0_100 }))}
-                      baseline={(aiForecastRes.baseline_series || []).map((p: any) => ({
-                        time: String(p.time),
-                        risk_score_0_100: Number(p.risk_score_0_100),
-                      }))}
-                    />
-                  </div>
-                </div>
-              ) : null}
-
-              <div style={{ marginTop: 12 }}>
-                <AiChatPanel lat={lat} lon={lon} hours={hours} weights={weights} />
+            <div className="drawerBody aiDrawerBody">
+              <div className="aiDrawerChatWrap">
+                <AiChatPanel
+                  lat={lat}
+                  lon={lon}
+                  hours={hours}
+                  weights={weights}
+                  decisionDate={aiChatDecisionDate}
+                  rankingSource={aiChatRankingSource}
+                  districtRows={aiChatDistrictRows}
+                  forecastSeries={aiForecastRes?.series || []}
+                />
               </div>
             </div>
           </div>
@@ -3950,6 +3995,9 @@ export default function Dashboard() {
               ) : null}
             </div>
             <div className="decisionReason">{decisionSnapshot.reason}</div>
+            <div style={{ marginTop: 8, fontSize: 12, color: "#334155" }}>
+              Kết luận này dựa trên điểm AHP hiện tại; AI hỗ trợ đọc xu hướng gần và khuyến nghị hành động.
+            </div>
             {quickDecisionMessage ? (
               <div className="criteriaInputNotice" style={{ marginBottom: 8 }}>
                 {quickDecisionMessage}
@@ -3969,27 +4017,7 @@ export default function Dashboard() {
             </ul>
           </div>
 
-          <div className="card" style={{ marginTop: 6 }}>
-            <div className="cardTitle">Tóm tắt nguồn & độ tin cậy</div>
-            <div className="decisionMetaRow" style={{ marginBottom: 6 }}>
-              <span>
-                Tọa độ: <b>{lat.toFixed(4)}, {lon.toFixed(4)}</b>
-              </span>
-              <span>
-                Địa chỉ: <b>{addrLabel || "Chưa chọn"}</b>
-              </span>
-            </div>
-            <div style={{ fontSize: 12, color: "#4b5563" }}>
-              Dữ liệu dùng để diễn giải bản đồ hiện tại:
-            </div>
-            <div style={{ fontSize: 12, color: "#4b5563", marginTop: 4 }}>
-              Nguồn trạm trên bản đồ: OpenAQ <b>{openaqMapCount}</b>, AQICN <b>{aqicnMapCount}</b>, IQAir <b>{iqairMapCount}</b>,
-              PurpleAir <b>{purpleAirMapCount}</b> (Tổng marker: <b>{openaqMapCount + aqicnMapCount + iqairMapCount + purpleAirMapCount}</b>).
-            </div>
-            <div style={{ fontSize: 12, color: "#4b5563", marginTop: 4 }}>
-              Độ tin cậy tổng hợp: <b>{sourceReliability.label}</b> ({sourceReliability.score}).
-            </div>
-          </div>
+
 
           <div className="card" style={{ marginTop: 6 }}>
             <div className="cardTitle">Quận đang chọn theo AHP</div>
@@ -4030,19 +4058,38 @@ export default function Dashboard() {
           {/* Cảnh báo sớm */}
           {showEarlyWarningPanel ? (
             <div className="card">
-              <div className="cardTitle">Cảnh báo sớm</div>
+              <div className="cardTitle">Nguy cơ ngắn hạn (AI hỗ trợ)</div>
+              <div style={{ fontSize: 12, color: "#334155", marginBottom: 8 }}>
+                AHP đánh giá hiện trạng; AI diễn giải và hỗ trợ nhận diện nguy cơ ngắn hạn theo dữ liệu gần.
+              </div>
               <div className="decisionMetaRow" style={{ marginBottom: 8 }}>
                 <span>
-                  Trạng thái: <b>{warning?.warning ? "Có tín hiệu cần chú ý" : "Chưa kích hoạt"}</b>
+                  Trạng thái ngắn hạn: <b>{warning?.warning ? "Có tín hiệu cần chú ý" : "Chưa kích hoạt"}</b>
                 </span>
                 <span>
-                  maxScore: <b>{warning?.maxScore !== undefined ? Number(warning.maxScore).toFixed(1) : "—"}</b>
+                  Mức nguy cơ ngắn hạn: <b>{warning?.maxLevel || "—"}</b>
                 </span>
                 <span>
-                  Mức dự báo cao nhất: <b>{warning?.maxLevel || "—"}</b>
+                  Khung thời gian tham chiếu: <b>{warning?.timeOfMax || "—"}</b>
                 </span>
               </div>
               <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 8 }}>{earlyWarningSummaryText}</div>
+              {aiForecastFreshness.isStale ? (
+                <div
+                  style={{
+                    border: "1px solid #fca5a5",
+                    background: "#fef2f2",
+                    color: "#991b1b",
+                    borderRadius: 10,
+                    padding: "8px 10px",
+                    fontSize: 12,
+                    marginBottom: 8,
+                    lineHeight: 1.45,
+                  }}
+                >
+                  {aiForecastFreshness.message}
+                </div>
+              ) : null}
               <button className="btn secondary" onClick={() => setShowEarlyWarningDetails((v) => !v)}>
                 {showEarlyWarningDetails ? "Ẩn chi tiết" : "Xem chi tiết"}
               </button>
