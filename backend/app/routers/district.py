@@ -67,6 +67,7 @@ _BASE_SNAPSHOT: Optional[Dict[int, Dict[str, float]]] = None
 _BASE_SNAPSHOT_AT: Optional[datetime] = None
 _DAILY_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 _CRITERIA_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+_FORECAST_RANK_CACHE: Dict[str, Dict[str, Any]] = {}
 _LOCK = asyncio.Lock()
 
 
@@ -366,7 +367,10 @@ def _compute_ahp_scored_rows(
             }
         )
 
-    reverse = rank_mode != "cost"
+    # IMPORTANT:
+    # In this DSS, criteria values (C1..C4) are "risk intensity" (higher = worse).
+    # So for the default rank_mode="cost" we want higher score to rank higher priority (rank=1).
+    reverse = rank_mode == "cost"
     scored.sort(key=lambda x: float(x["AHPScore"]), reverse=reverse)
     for i, row in enumerate(scored, start=1):
         row["Rank"] = i
@@ -521,6 +525,167 @@ class DistrictPolicyScenarioRequest(BaseModel):
     autofill: bool = True
     fallback_days: int = 30
     force_refresh: bool = False
+
+
+class DistrictForecastRankingRequest(BaseModel):
+    horizon_hours: int = Field(72, ge=24, le=168)
+    threshold: float = Field(60.0, ge=0.0, le=100.0)
+    topN: int = Field(5, ge=1, le=13)
+
+
+def _forecast_future_indexes(times: List[str], horizon_hours: int) -> List[int]:
+    now_local = datetime.now().replace(minute=0, second=0, microsecond=0)
+    indexes: List[int] = []
+    for idx, raw in enumerate(times or []):
+        try:
+            text = str(raw).strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone().replace(tzinfo=None)
+        except Exception:
+            continue
+        if dt >= now_local:
+            indexes.append(idx)
+    if not indexes:
+        return list(range(0, min(len(times), max(1, horizon_hours))))
+    return indexes[: max(1, min(horizon_hours, len(indexes)))]
+
+
+def _score_from_hourly(hourly: Dict[str, Any], idx: int) -> float:
+    values = {
+        "pm2_5": float((hourly.get("pm2_5") or [0.0])[idx] or 0.0),
+        "pm10": float((hourly.get("pm10") or [0.0])[idx] or 0.0),
+        "no2": float((hourly.get("nitrogen_dioxide") or [0.0])[idx] or 0.0),
+        "o3": float((hourly.get("ozone") or [0.0])[idx] or 0.0),
+        "co": float((hourly.get("carbon_monoxide") or [0.0])[idx] or 0.0),
+    }
+    out = compute_score_0_100(values, {})
+    return float(out.get("score_0_100") or 0.0)
+
+
+def _std(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((x - mean) ** 2 for x in values) / len(values)
+    return math.sqrt(max(0.0, variance))
+
+
+async def _compute_forecast_rank_rows(horizon_hours: int = 72, threshold: float = 60.0) -> Dict[str, Any]:
+    horizon = max(24, min(168, int(horizon_hours or 72)))
+    sem = asyncio.Semaphore(6)
+    criteria_rows: List[Dict[str, Any]] = []
+    diagnostics: List[Dict[str, Any]] = []
+
+    async def fetch_one(d: DistrictPoint):
+        async with sem:
+            try:
+                pack = await fetch_hourly_async(
+                    lat=d.lat,
+                    lon=d.lon,
+                    hours=horizon,
+                    past_days=0,
+                    timezone="Asia/Ho_Chi_Minh",
+                )
+                hourly = (pack or {}).get("hourly") or {}
+                times = list(hourly.get("time") or [])
+                if not times:
+                    raise RuntimeError("no forecast time series")
+
+                idxs = _forecast_future_indexes(times, horizon_hours=horizon)
+                if len(idxs) < 2:
+                    raise RuntimeError("forecast window too short")
+
+                scores = [_score_from_hourly(hourly, idx) for idx in idxs]
+                pm25 = [float((hourly.get("pm2_5") or [0.0])[idx] or 0.0) for idx in idxs]
+                no2 = [float((hourly.get("nitrogen_dioxide") or [0.0])[idx] or 0.0) for idx in idxs]
+                o3 = [float((hourly.get("ozone") or [0.0])[idx] or 0.0) for idx in idxs]
+
+                hours_above = sum(1 for s in scores if s >= threshold)
+                exceed_ratio = (hours_above / max(1, len(scores))) * 100.0
+                event_count = 0
+                was_above = False
+                for s in scores:
+                    now_above = s >= threshold
+                    if now_above and not was_above:
+                        event_count += 1
+                    was_above = now_above
+
+                trend_delta = max(0.0, scores[-1] - scores[0])
+                c1 = max(scores)
+                c2 = exceed_ratio
+                c3 = (event_count / max(1, len(scores))) * 100.0
+                c4 = _clamp(
+                    0.35 * _to_norm(sum(o3) / max(1, len(o3)), 220.0)
+                    + 0.35 * _to_norm(sum(no2) / max(1, len(no2)), 180.0)
+                    + 0.20 * _clamp(trend_delta * 2.0, 0.0, 100.0)
+                    + 0.10 * _clamp(_std(scores) * 1.4, 0.0, 100.0),
+                    0.0,
+                    100.0,
+                )
+
+                criteria_rows.append(
+                    {
+                        "DistrictId": d.DistrictId,
+                        "DistrictName": d.DistrictName,
+                        "C1": round(float(c1), 6),
+                        "C2": round(float(c2), 6),
+                        "C3": round(float(c3), 6),
+                        "C4": round(float(c4), 6),
+                        "ForecastHoursUsed": len(idxs),
+                        "MaxForecastScore": round(float(max(scores)), 3),
+                        "AvgForecastScore": round(float(sum(scores) / max(1, len(scores))), 3),
+                        "HoursAboveThreshold": int(hours_above),
+                        "Threshold": float(threshold),
+                        "LatestForecastTime": str(times[idxs[-1]]),
+                    }
+                )
+                diagnostics.append(
+                    {
+                        "districtId": d.DistrictId,
+                        "districtName": d.DistrictName,
+                        "status": "ok",
+                        "hoursUsed": len(idxs),
+                    }
+                )
+            except Exception as exc:
+                diagnostics.append(
+                    {
+                        "districtId": d.DistrictId,
+                        "districtName": d.DistrictName,
+                        "status": "error",
+                        "error": str(exc),
+                    }
+                )
+
+    await asyncio.gather(*(fetch_one(d) for d in DISTRICT_POINTS))
+    criteria_rows.sort(key=lambda x: int(x["DistrictId"]))
+    if not criteria_rows:
+        raise HTTPException(status_code=502, detail="Không lấy được forecast theo quận để tính xếp hạng.")
+
+    base_ahp = compute_ahp(DEFAULT_BASELINE_AHP_MATRIX, DEFAULT_CRITERIA_LABELS[:])
+    weights = _weights_to_dict(base_ahp.get("weights") or [])
+    scored = _compute_ahp_scored_rows(
+        rows=criteria_rows,
+        labels=DEFAULT_CRITERIA_LABELS[:],
+        weights=weights,
+        normalize_alternatives=True,
+        rank_mode="cost",
+    )
+    # Convert to risk-priority ranking: higher score => higher risk => rank 1.
+    scored = sorted(scored, key=lambda x: float(x.get("AHPScore") or x.get("Score") or 0.0), reverse=True)
+    for i, row in enumerate(scored, start=1):
+        row["Rank"] = i
+    return {
+        "horizonHours": horizon,
+        "threshold": threshold,
+        "weights": weights,
+        "criteriaRows": criteria_rows,
+        "rankingRows": scored,
+        "diagnostics": diagnostics,
+    }
 
 
 @router.get("/daily")
@@ -857,4 +1022,25 @@ async def district_policy_scenario(req: DistrictPolicyScenarioRequest) -> Dict[s
                 "description": bias_desc_map.get(bias_criterion, "ưu tiên theo cấu hình kịch bản"),
             },
         },
+    }
+
+
+@router.post("/forecast-ranking")
+async def district_forecast_ranking(req: DistrictForecastRankingRequest) -> Dict[str, Any]:
+    payload = await _compute_forecast_rank_rows(
+        horizon_hours=req.horizon_hours,
+        threshold=req.threshold,
+    )
+    ranking_rows = list(payload.get("rankingRows") or [])
+    top_n = max(1, min(len(ranking_rows), int(req.topN or 5)))
+    return {
+        "horizonHours": payload["horizonHours"],
+        "threshold": payload["threshold"],
+        "weights": payload["weights"],
+        "count": len(ranking_rows),
+        "topN": top_n,
+        "topItems": ranking_rows[:top_n],
+        "items": ranking_rows,
+        "criteriaRows": payload["criteriaRows"],
+        "diagnostics": payload["diagnostics"],
     }

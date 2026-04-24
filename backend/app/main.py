@@ -21,6 +21,7 @@ from app.routers.openaq_test import router as openaq_test_router
 from app.routers.ai import router as ai_router
 from app.routers.dss_run import router as dss_router
 from app.routers.district import router as district_router
+from app.routers.geocode import router as geocode_router
 
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -76,4 +77,5 @@ app.include_router(risk_station_router, prefix="/api")
 app.include_router(ai_router, prefix="/api")
 app.include_router(dss_router, prefix="/api")
 app.include_router(district_router, prefix="/api")
+app.include_router(geocode_router, prefix="/api")
 app.include_router(openaq_test_router)
