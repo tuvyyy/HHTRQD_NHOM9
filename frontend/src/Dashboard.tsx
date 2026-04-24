@@ -32,12 +32,14 @@ import {
   type ScenarioPresetName,
   type ScenarioThresholds,
   type ScenarioWeights,
+  getDistrictForecastRanking,
+  type DistrictForecastRankingItem,
+  type DistrictForecastRankingResponse,
 } from "./api";
 import HourlyChart from "./HourlyChart";
 import "./dashboard.css";
 import "./leafletIconFix";
-import MapPicker, { type DistrictMapResultItem, type MapSourceStatus } from "./MapPicker";
-import EarlyWarningCard from "./EarlyWarningCard";
+import MapPicker, { type DistrictMapDetail, type DistrictMapResultItem, type MapSourceStatus } from "./MapPicker";
 import AddressSearch from "./AddressSearch";
 import AiChatPanel from "./AiChatPanel";
 import StationForecastPage from "./StationForecastPage";
@@ -444,6 +446,72 @@ function recommendationByAhpPriority(priorityLabel: string) {
   return "Giám sát định kỳ";
 }
 
+function findForecastDistrictRow(
+  payload: DistrictForecastRankingResponse | null,
+  districtName: string
+): DistrictForecastRankingItem | null {
+  if (!payload?.items?.length || !districtName) return null;
+  const key = normalizeDistrictKey(districtName);
+  return (
+    payload.items.find((it) => normalizeDistrictKey(String(it.districtName || "")) === key) ||
+    payload.items.find((it) => {
+      const rk = normalizeDistrictKey(String(it.districtName || ""));
+      return key.includes(rk) || rk.includes(key);
+    }) ||
+    null
+  );
+}
+
+function buildOutdoorAdviceNote(params: {
+  districtName: string;
+  nowRank?: number | null;
+  rank24h?: number | null;
+  rank72h?: number | null;
+  fallbackRecommendation?: string;
+}) {
+  const { districtName, nowRank, rank24h, rank72h, fallbackRecommendation } = params;
+  const safeNow = Number(nowRank || 0);
+  const safe24 = Number(rank24h || 0);
+  const safe72 = Number(rank72h || 0);
+
+  if (safeNow > 0 && safeNow <= 3) {
+    return `${districtName} đang thuộc nhóm rủi ro cao. Nên giảm thời gian ngoài trời, đeo khẩu trang lọc bụi (N95/KF94) và tránh trục giao thông đông giờ cao điểm.`;
+  }
+  if (safe24 > 0 && safe72 > 0) {
+    if (safe72 < safe24) {
+      return `Dự báo 3 ngày tới có xu hướng tăng ưu tiên so với 1 ngày tới. Nên theo dõi sát bản đồ và chuẩn bị phương án di chuyển ít phơi nhiễm.`;
+    }
+    if (safe72 > safe24) {
+      return `Dự báo 3 ngày tới có tín hiệu giảm nhẹ so với 1 ngày tới, nhưng vẫn nên duy trì các biện pháp giảm phơi nhiễm khi ra đường.`;
+    }
+  }
+  return fallbackRecommendation || "Duy trì theo dõi định kỳ, ưu tiên đi đường vào thời điểm ít xe để giảm phơi nhiễm.";
+}
+
+function buildHealthAdvice(params: {
+  nowRank?: number | null;
+  rank24h?: number | null;
+  rank72h?: number | null;
+}) {
+  const now = Number(params.nowRank || 0);
+  const r24 = Number(params.rank24h || 0);
+  const r72 = Number(params.rank72h || 0);
+  const lines: string[] = [];
+  if (now > 0 && now <= 3) {
+    lines.push("Đeo khẩu trang lọc bụi mịn N95/KF94 khi di chuyển ngoài trời.");
+    lines.push("Giảm thời gian ở ngoài trời, ưu tiên vào không gian kín có thông gió/lọc khí.");
+  } else {
+    lines.push("Nếu cần ra đường lâu, vẫn nên đeo khẩu trang và hạn chế đứng gần trục giao thông đông.");
+  }
+  if (r24 > 0 && r72 > 0 && r72 <= r24) {
+    lines.push("3 ngày tới có thể giảm nhẹ, nhưng vẫn nên theo dõi cập nhật theo giờ trước khi đi xa.");
+  } else if (r24 > 0 && r72 > 0) {
+    lines.push("3 ngày tới chưa có tín hiệu giảm rõ, nên hạn chế hoạt động ngoài trời kéo dài.");
+  }
+  lines.push("Trẻ em, người cao tuổi, người có bệnh hô hấp/tim mạch nên giảm phơi nhiễm tối đa.");
+  return lines;
+}
+
 export default function Dashboard() {
   const [lat, setLat] = useState(10.7769);
   const [lon, setLon] = useState(106.7009);
@@ -616,9 +684,9 @@ export default function Dashboard() {
   const [scenarioLoading, setScenarioLoading] = useState(false);
   const [scenarioErr, setScenarioErr] = useState<string | null>(null);
   const [scenarioResult, setScenarioResult] = useState<DistrictPolicyScenarioResponse | null>(null);
-  const [showEarlyWarningDetails, setShowEarlyWarningDetails] = useState(false);
-  const [showScenarioAdvanced, setShowScenarioAdvanced] = useState(false);
-  const [showScenarioGuide, setShowScenarioGuide] = useState(false);
+  const [systemExportLoading, setSystemExportLoading] = useState(false);
+  const [systemExportErr, setSystemExportErr] = useState<string | null>(null);
+  const [accordionDecisionOpen, setAccordionDecisionOpen] = useState(true);
 
   async function loadDistrictDaily(dateStr: string) {
     setDistrictDailyErr(null);
@@ -1448,6 +1516,12 @@ export default function Dashboard() {
     topDistricts?: string[];
     weightOrderText?: string;
   } | null>(null);
+  const [districtForecast1d, setDistrictForecast1d] = useState<DistrictForecastRankingResponse | null>(null);
+  const [districtForecast3d, setDistrictForecast3d] = useState<DistrictForecastRankingResponse | null>(null);
+  const [districtForecast1dLoading, setDistrictForecast1dLoading] = useState(false);
+  const [districtForecast3dLoading, setDistrictForecast3dLoading] = useState(false);
+  const [districtForecast1dErr, setDistrictForecast1dErr] = useState<string | null>(null);
+  const [districtForecast3dErr, setDistrictForecast3dErr] = useState<string | null>(null);
   const [mapSourceStatuses, setMapSourceStatuses] = useState<SourceStatusMap>({});
   const sourceReliability = useMemo(() => {
     const rows = ["openaq", "aqicn", "iqair", "purpleair"]
@@ -1584,12 +1658,58 @@ export default function Dashboard() {
     }
   }
 
+  async function ensureDistrictForecastRanking(horizon: 24 | 72) {
+    if (horizon === 24) {
+      if (districtForecast1d || districtForecast1dLoading) return;
+      setDistrictForecast1dLoading(true);
+      setDistrictForecast1dErr(null);
+      try {
+        const res = await getDistrictForecastRanking({ horizon_hours: 24, threshold: 60, topN: 13 });
+        setDistrictForecast1d(res);
+      } catch (e: any) {
+        setDistrictForecast1dErr(e?.response?.data?.detail || e?.message || "Không tải được dự báo 1 ngày.");
+      } finally {
+        setDistrictForecast1dLoading(false);
+      }
+      return;
+    }
+    if (districtForecast3d || districtForecast3dLoading) return;
+    setDistrictForecast3dLoading(true);
+    setDistrictForecast3dErr(null);
+    try {
+      const res = await getDistrictForecastRanking({ horizon_hours: 72, threshold: 60, topN: 13 });
+      setDistrictForecast3d(res);
+    } catch (e: any) {
+      setDistrictForecast3dErr(e?.response?.data?.detail || e?.message || "Không tải được dự báo 3 ngày.");
+    } finally {
+      setDistrictForecast3dLoading(false);
+    }
+  }
+
   useEffect(() => {
     if (!aiDrawerOpen || !showAiPanel) return;
     runAiForecast(24).catch(() => {});
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiDrawerOpen, showAiPanel, lat, lon]);
+
+  useEffect(() => {
+    if (topPageMode !== "map") return undefined;
+    const t = window.setTimeout(() => {
+      runAiForecast(24).catch(() => {});
+    }, 420);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topPageMode, lat, lon, weights.C1, weights.C2, weights.C3, weights.C4, hours]);
+
+  useEffect(() => {
+    if (!selectedMapDistrict) return;
+    (async () => {
+      await ensureDistrictForecastRanking(24).catch(() => {});
+      await ensureDistrictForecastRanking(72).catch(() => {});
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedMapDistrict]);
 
   // runAiChat removed (AiChatPanel owns conversation state)
 
@@ -2144,33 +2264,6 @@ export default function Dashboard() {
       null
     );
   }, [currentDistrictDecisionContext, districtResultPaint, scenarioCompareItems]);
-  const selectedDistrictTopCriteriaText = useMemo(() => {
-    if (!currentDistrictDecisionContext) return "";
-    const key = normalizeDistrictKey(currentDistrictDecisionContext.districtName);
-    let criteriaObj: Record<string, number> | null = null;
-    if (districtResultPaint?.source === "policy-scenario") {
-      const pickedScenarioRow =
-        (scenarioResult?.scenarioResult || []).find((row) => normalizeDistrictKey(String(row.districtName || "")) === key) ||
-        (scenarioResult?.scenarioResult || []).find((row) =>
-          key.includes(normalizeDistrictKey(String(row.districtName || "")))
-        );
-      if (pickedScenarioRow?.criteriaValues && typeof pickedScenarioRow.criteriaValues === "object") {
-        criteriaObj = pickedScenarioRow.criteriaValues as Record<string, number>;
-      }
-    }
-    if (!criteriaObj) {
-      const baselineRow = manualFinalRows.find((row) => normalizeDistrictKey(String(row.DistrictName || "")) === key);
-      if (baselineRow?.Details) criteriaObj = baselineRow.Details as unknown as Record<string, number>;
-    }
-    if (!criteriaObj) return "";
-    const ranked = (["C1", "C2", "C3", "C4"] as const)
-      .map((k) => ({ key: k, value: Number(criteriaObj?.[k] || 0) }))
-      .filter((it) => Number.isFinite(it.value))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 2)
-      .map((it) => it.key);
-    return ranked.length ? ranked.join(", ") : "";
-  }, [currentDistrictDecisionContext, districtResultPaint, scenarioResult, manualFinalRows]);
   const selectedDistrictRecommendation = useMemo(() => {
     if (!currentDistrictDecisionContext) return "";
     if (selectedDistrictScenarioContext) {
@@ -2185,40 +2278,338 @@ export default function Dashboard() {
     }
     return recommendationByAhpPriority(currentDistrictDecisionContext.priorityLabel);
   }, [currentDistrictDecisionContext, selectedDistrictScenarioContext, scenarioAppliedTopN]);
-  const earlyWarningSummaryText = useMemo(() => {
-    const status = warning?.warning ? "Có tín hiệu cần chú ý" : "Chưa kích hoạt";
-    const maxScore = warning?.maxScore !== undefined ? Number(warning.maxScore).toFixed(1) : "—";
-    const maxLevel = warning?.maxLevel || "—";
-    return `Trạng thái ngắn hạn: ${status} · điểm cao nhất: ${maxScore} · mức nguy cơ ngắn hạn: ${maxLevel}.`;
-  }, [warning]);
-  const aiForecastFreshness = useMemo(() => {
-    const times: number[] = [];
-    const candidates = [
-      aiForecastRes?.time_of_max,
-      aiForecastRes?.current_time,
-      aiForecastRes?.series?.[aiForecastRes?.series.length - 1]?.time,
-    ].filter(Boolean) as string[];
-    for (const raw of candidates) {
-      const t = new Date(String(raw)).getTime();
-      if (Number.isFinite(t)) times.push(t);
+  const selectedDistrictForecast1dRow = useMemo(
+    () => findForecastDistrictRow(districtForecast1d, currentDistrictDecisionContext?.districtName || ""),
+    [districtForecast1d, currentDistrictDecisionContext]
+  );
+  const selectedDistrictForecast3dRow = useMemo(
+    () => findForecastDistrictRow(districtForecast3d, currentDistrictDecisionContext?.districtName || ""),
+    [districtForecast3d, currentDistrictDecisionContext]
+  );
+  const mapDistrictDetailPanel = useMemo<DistrictMapDetail | null>(() => {
+    if (!currentDistrictDecisionContext) return null;
+    const districtName = currentDistrictDecisionContext.districtName;
+    const f1 = selectedDistrictForecast1dRow;
+    const f3 = selectedDistrictForecast3dRow;
+    const note = buildOutdoorAdviceNote({
+      districtName,
+      nowRank: currentDistrictDecisionContext.rank,
+      rank24h: Number(f1?.rank || 0) || null,
+      rank72h: Number(f3?.rank || 0) || null,
+      fallbackRecommendation: selectedDistrictRecommendation,
+    });
+    const healthAdvice = buildHealthAdvice({
+      nowRank: currentDistrictDecisionContext.rank,
+      rank24h: Number(f1?.rank || 0) || null,
+      rank72h: Number(f3?.rank || 0) || null,
+    });
+    return {
+      districtName,
+      currentRank: Number(currentDistrictDecisionContext.rank || 0) || null,
+      currentTotal: Number(currentDistrictDecisionContext.total || 0) || null,
+      currentScore: Number(currentDistrictDecisionContext.score || 0) || null,
+      currentPriority: currentDistrictDecisionContext.priorityLabel || "",
+      forecast1d: {
+        label: "Dự báo 1 ngày tới",
+        rank: Number(f1?.rank || 0) || null,
+        score: Number(f1?.score || 0) || null,
+        topDistrict: String(districtForecast1d?.topItems?.[0]?.districtName || ""),
+        timeRef: String(f1?.latestForecastTime || ""),
+      },
+      forecast3d: {
+        label: "Dự báo 3 ngày tới",
+        rank: Number(f3?.rank || 0) || null,
+        score: Number(f3?.score || 0) || null,
+        topDistrict: String(districtForecast3d?.topItems?.[0]?.districtName || ""),
+        timeRef: String(f3?.latestForecastTime || ""),
+      },
+      forecastLoading: districtForecast1dLoading || districtForecast3dLoading,
+      forecastError: districtForecast1dErr || districtForecast3dErr,
+      note,
+      healthAdvice,
+    };
+  }, [
+    currentDistrictDecisionContext,
+    selectedDistrictForecast1dRow,
+    selectedDistrictForecast3dRow,
+    selectedDistrictRecommendation,
+    districtForecast1d,
+    districtForecast3d,
+    districtForecast1dLoading,
+    districtForecast3dLoading,
+    districtForecast1dErr,
+    districtForecast3dErr,
+  ]);
+  const rightPanelShortTermText = useMemo(() => {
+    if (aiForecastLoading) return "Đang cập nhật";
+    if (warning?.warning) return warning?.maxLevel ? `Cảnh báo ${warning.maxLevel}` : "Có tín hiệu cần chú ý";
+    return "Chưa kích hoạt";
+  }, [aiForecastLoading, warning]);
+  const rightSummaryChips = useMemo(
+    () => [
+      { label: "Mức rủi ro", value: String(risk?.level || "—") },
+      { label: "Độ tin cậy nguồn", value: `${sourceReliability.label} (${sourceReliability.score})` },
+      { label: "Ngắn hạn", value: rightPanelShortTermText },
+    ],
+    [risk?.level, sourceReliability.label, sourceReliability.score, rightPanelShortTermText]
+  );
+
+  function exportQuickDecisionReport() {
+    const lines: string[] = [];
+    lines.push("BAO CAO NHANH DSS");
+    lines.push(`Thoi gian: ${new Date().toLocaleString("vi-VN")}`);
+    lines.push(`Ket luan nhanh: ${decisionSnapshot.headline}`);
+    lines.push(`Diem DSS: ${decisionSnapshot.scoreText}`);
+    lines.push(`Muc hien tai: ${decisionSnapshot.levelText}`);
+    lines.push(`Top AHP: ${districtResultPaint?.topDistricts?.join(", ") || "Chua co"}`);
+    if (mapDistrictDetailPanel) {
+      lines.push("");
+      lines.push(`Quan dang xem: ${mapDistrictDetailPanel.districtName}`);
+      lines.push(`Hang hien tai: ${mapDistrictDetailPanel.currentRank || "-"}/${mapDistrictDetailPanel.currentTotal || "-"}`);
+      lines.push(`Diem hien tai: ${toFixedOrDash(mapDistrictDetailPanel.currentScore, 6)}`);
+      lines.push(`Muc uu tien: ${mapDistrictDetailPanel.currentPriority || "-"}`);
+      if (mapDistrictDetailPanel.forecast1d?.rank) {
+        lines.push(`Du bao 1 ngay: hang #${mapDistrictDetailPanel.forecast1d.rank}, diem ${toFixedOrDash(mapDistrictDetailPanel.forecast1d.score, 6)}`);
+      }
+      if (mapDistrictDetailPanel.forecast3d?.rank) {
+        lines.push(`Du bao 3 ngay: hang #${mapDistrictDetailPanel.forecast3d.rank}, diem ${toFixedOrDash(mapDistrictDetailPanel.forecast3d.score, 6)}`);
+      }
+      if (mapDistrictDetailPanel.note) lines.push(`Luu y: ${mapDistrictDetailPanel.note}`);
     }
-    if (!times.length) {
-      return {
-        isStale: true,
-        message:
-          "Dữ liệu forecast chưa mới, độ tin cậy giảm; chỉ dùng kết quả AI như hỗ trợ vận hành.",
-      };
+    lines.push("");
+    lines.push("Nguon: He thong DSS AHP + AI ngan han (tham khao van hanh).");
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dss-quick-report-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportDashboardPdfReport() {
+    setSystemExportErr(null);
+    setSystemExportLoading(true);
+    try {
+      let forecast1 = districtForecast1d;
+      let forecast3 = districtForecast3d;
+      if (!forecast1) {
+        try {
+          forecast1 = await getDistrictForecastRanking({ horizon_hours: 24, threshold: 60, topN: 13 });
+          setDistrictForecast1d(forecast1);
+        } catch {
+          forecast1 = null;
+        }
+      }
+      if (!forecast3) {
+        try {
+          forecast3 = await getDistrictForecastRanking({ horizon_hours: 72, threshold: 60, topN: 13 });
+          setDistrictForecast3d(forecast3);
+        } catch {
+          forecast3 = null;
+        }
+      }
+
+      const rows = [...aiChatDistrictRows]
+        .filter((r) => String(r.districtName || "").trim().length > 0)
+        .sort((a, b) => {
+          const ar = Number(a.rank || 0);
+          const br = Number(b.rank || 0);
+          if (ar > 0 && br > 0) return ar - br;
+          return Number(b.score || 0) - Number(a.score || 0);
+        });
+
+      if (rows.length < 13) {
+        throw new Error("Chưa đủ dữ liệu 13 quận nội thành để xuất PDF. Hãy chạy tính AHP bước 4 trước.");
+      }
+
+      const esc = (v: any) =>
+        String(v ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+
+      const tableRowsHtml = rows
+        .map((r) => {
+          const f1 = findForecastDistrictRow(forecast1, String(r.districtName || ""));
+          const f3 = findForecastDistrictRow(forecast3, String(r.districtName || ""));
+          const advice = buildOutdoorAdviceNote({
+            districtName: String(r.districtName || ""),
+            nowRank: Number(r.rank || 0),
+            rank24h: Number(f1?.rank || 0) || null,
+            rank72h: Number(f3?.rank || 0) || null,
+            fallbackRecommendation: recommendationByAhpPriority(
+              scenarioPriorityLabelByRank(Number(r.rank || 0), 5)
+            ),
+          });
+          return `
+            <tr>
+              <td>${esc(r.districtName)}</td>
+              <td style="text-align:center">${esc(r.rank)}</td>
+              <td style="text-align:right">${esc(toFixedOrDash(r.score, 6))}</td>
+              <td style="text-align:right">${esc(toFixedOrDash(r.C1, 6))}</td>
+              <td style="text-align:right">${esc(toFixedOrDash(r.C2, 6))}</td>
+              <td style="text-align:right">${esc(toFixedOrDash(r.C3, 6))}</td>
+              <td style="text-align:right">${esc(toFixedOrDash(r.C4, 6))}</td>
+              <td style="text-align:center">${esc(f1?.rank ? `#${f1.rank}` : "—")}</td>
+              <td style="text-align:center">${esc(f3?.rank ? `#${f3.rank}` : "—")}</td>
+              <td>${esc(advice)}</td>
+            </tr>
+          `;
+        })
+        .join("");
+
+      const top3Text = rows
+        .slice(0, 3)
+        .map((r) => `${r.districtName} (#${r.rank}, ${toFixedOrDash(r.score, 6)})`)
+        .join(" · ");
+
+      const html = `
+        <div style="font-family: Arial, sans-serif; color:#0f172a; background:#fff; width:1120px; padding:20px;">
+          <h1 style="margin:0 0 4px; font-size:24px;">BÁO CÁO DASHBOARD DSS AHP + AI</h1>
+          <div style="font-size:12px; color:#475569; margin-bottom:12px;">
+            Ngày dữ liệu: <b>${esc(histDate)}</b> · Thời điểm xuất: <b>${esc(new Date().toLocaleString("vi-VN"))}</b>
+          </div>
+
+          <div style="border:1px solid #dbe4f0; border-radius:10px; padding:10px; margin-bottom:10px;">
+            <div style="font-size:14px; margin-bottom:6px;"><b>Tổng quan nhanh</b></div>
+            <div style="font-size:12px; line-height:1.5;">
+              Điểm DSS hiện tại: <b>${esc(risk ? Number(risk.score_0_100).toFixed(2) : "—")}</b> ·
+              Mức rủi ro: <b>${esc(risk?.level || "Chưa có")}</b> ·
+              Nguồn xếp hạng: <b>${esc(aiChatRankingSource)}</b><br/>
+              Top 3 quận hiện tại: <b>${esc(top3Text || "—")}</b>
+            </div>
+          </div>
+
+          <div style="font-size:14px; margin:8px 0 6px;"><b>Bảng xếp hạng đầy đủ 13 quận nội thành</b></div>
+          <table style="width:100%; border-collapse:collapse; font-size:11px;">
+            <thead>
+              <tr>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">Quận</th>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">Hạng</th>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">Điểm AHP</th>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">C1</th>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">C2</th>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">C3</th>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">C4</th>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">Dự báo 1 ngày</th>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">Dự báo 3 ngày</th>
+                <th style="border:1px solid #cbd5e1; padding:6px; background:#f8fafc;">Lưu ý khi ra đường</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${tableRowsHtml}
+            </tbody>
+          </table>
+
+          <div style="margin-top:10px; font-size:11px; color:#64748b;">
+            Ghi chú: Báo cáo dùng cho hỗ trợ quyết định vận hành. Cảnh báo ngắn hạn phụ thuộc độ mới dữ liệu forecast.
+          </div>
+        </div>
+      `;
+
+      const host = document.createElement("div");
+      host.style.position = "fixed";
+      host.style.left = "-10000px";
+      host.style.top = "0";
+      host.style.zIndex = "-1";
+      host.innerHTML = html;
+      document.body.appendChild(host);
+      try {
+        const mod = await import("html2pdf.js");
+        const html2pdf = (mod as any).default || (mod as any);
+        await html2pdf()
+          .set({
+            margin: [8, 8, 8, 8],
+            filename: `bao-cao-dashboard-13-quan-${histDate}.pdf`,
+            image: { type: "jpeg", quality: 0.98 },
+            html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff" },
+            jsPDF: { unit: "mm", format: "a4", orientation: "landscape" },
+            pagebreak: { mode: ["css", "legacy"] },
+          })
+          .from(host.firstElementChild as HTMLElement)
+          .save();
+      } finally {
+        host.remove();
+      }
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      setSystemExportErr(msg);
+    } finally {
+      setSystemExportLoading(false);
     }
-    const latest = Math.max(...times);
-    if (latest < Date.now() - 60 * 60 * 1000) {
-      return {
-        isStale: true,
-        message:
-          "Dữ liệu forecast chưa mới, độ tin cậy giảm; chỉ dùng kết quả AI như hỗ trợ vận hành.",
-      };
-    }
-    return { isStale: false, message: "" };
-  }, [aiForecastRes]);
+  }
+
+  function exportScenarioComparisonCsv() {
+    if (!scenarioCompareItems.length) return;
+    const esc = (v: any) => {
+      const s = String(v ?? "");
+      if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    };
+    const head = [
+      "Quan",
+      "Hang_goc",
+      "Hang_kich_ban",
+      "Uu_tien_kich_ban",
+      "Doi_hang",
+      "Diem_goc",
+      "Diem_kich_ban",
+      "Chenh_lech_diem",
+      "Muc_goc",
+      "Muc_kich_ban",
+      "Loai_rui_ro",
+      "Khuyen_nghi",
+      "Ly_do_thay_doi",
+    ];
+    const rows = scenarioCompareItems.map((it) => {
+      const deltaRank = Number(it.rankDelta || 0);
+      return [
+        it.districtName,
+        it.baselineRank,
+        it.scenarioRank,
+        scenarioPriorityLabelByRank(Number(it.scenarioRank || 0), scenarioAppliedTopN),
+        deltaRank,
+        toFixedOrDash(it.baselineScore, 6),
+        toFixedOrDash(it.scenarioScore, 6),
+        toFixedOrDash(Number(it.scoreDelta || 0), 6),
+        it.baselineLevel,
+        it.scenarioLevel,
+        it.riskType,
+        compactScenarioRecommendation(
+          String(it.scenarioLevel || ""),
+          String(it.recommendation || ""),
+          Boolean(it.earlyWarning),
+          Number(it.scenarioRank || 0),
+          scenarioAppliedTopN,
+          deltaRank
+        ),
+        buildScenarioReasonHint(
+          scenarioPresetName,
+          scenarioRowsByDistrictId.get(Number(it.districtId))?.criteriaValues,
+          deltaRank,
+          Number(it.scenarioRank || 0),
+          scenarioAppliedTopN
+        ) || it.rankChangeReason || "Dieu chinh theo trong so/nguong",
+      ];
+    });
+    const csv = [head.join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `scenario-compare-${scenarioResult?.date || histDate}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   const stepStateClass = (step: CriteriaStepIndex) =>
     manualStep === step ? "current" : manualStep > step ? "done" : "locked";
   const stepFocusClass = (step: CriteriaStepIndex) => (activeCriteriaStep === step ? "active-step" : "inactive-step");
@@ -2293,6 +2684,72 @@ export default function Dashboard() {
       reason,
     };
   }, [risk, warning, topFactor, sourceReliability]);
+
+  const decisionSupportView = useMemo(() => {
+    const selectedDistrict =
+      mapDistrictDetailPanel?.districtName ||
+      currentDistrictDecisionContext?.districtName ||
+      districtResultPaint?.topDistricts?.[0] ||
+      "Chưa xác định";
+
+    const selectedRank =
+      mapDistrictDetailPanel?.currentRank ||
+      currentDistrictDecisionContext?.rank ||
+      null;
+    const selectedTotal =
+      mapDistrictDetailPanel?.currentTotal ||
+      currentDistrictDecisionContext?.total ||
+      null;
+    const selectedScore =
+      mapDistrictDetailPanel?.currentScore ??
+      currentDistrictDecisionContext?.score ??
+      null;
+
+    const tMaxRaw = String(aiForecastRes?.time_of_max || "").trim();
+    const tMaxMs = tMaxRaw ? new Date(tMaxRaw).getTime() : Number.NaN;
+    const nowMs = Date.now();
+    const hasForecastTime = Number.isFinite(tMaxMs);
+    const staleForecast = hasForecastTime ? tMaxMs < nowMs - 6 * 3600 * 1000 : true;
+    const horizonText = hasForecastTime ? new Date(tMaxMs).toLocaleString("vi-VN") : "Chưa có mốc dự báo gần";
+    const confidenceText = staleForecast
+      ? "Thấp (forecast cũ hoặc chưa cập nhật)"
+      : `${aiForecastRes?.confidence_label || sourceReliability.label} (${Math.round(
+          Number(aiForecastRes?.confidence_0_100 ?? sourceReliability.score)
+        )}/100)`;
+
+    const proposedDecision = selectedDistrict === "Chưa xác định"
+      ? "Chọn một quận trên bản đồ để hệ thống đề xuất ưu tiên can thiệp cụ thể."
+      : `Ưu tiên theo dõi ${selectedDistrict} trong phiên hiện tại và cập nhật theo chu kỳ 6-24 giờ.`;
+
+    const operationalAction =
+      decisionSnapshot.tone === "red"
+        ? "Kích hoạt cảnh báo cộng đồng, hạn chế hoạt động ngoài trời giờ cao điểm."
+        : decisionSnapshot.tone === "orange"
+          ? "Tăng giám sát điểm nóng giao thông và chuẩn bị kịch bản cảnh báo sớm."
+          : decisionSnapshot.tone === "yellow"
+            ? "Giám sát định kỳ theo giờ, ưu tiên nhóm nhạy cảm ở khu vực đông dân."
+            : "Duy trì giám sát nền, chưa cần biện pháp can thiệp mạnh.";
+
+    return {
+      selectedDistrict,
+      selectedRank,
+      selectedTotal,
+      selectedScore,
+      horizonText,
+      confidenceText,
+      staleForecast,
+      proposedDecision,
+      operationalAction,
+      basisLine: `AHP hiện trạng + xu hướng forecast gần + độ tin cậy nguồn (${sourceReliability.label}).`,
+    };
+  }, [
+    mapDistrictDetailPanel,
+    currentDistrictDecisionContext,
+    districtResultPaint,
+    aiForecastRes,
+    sourceReliability,
+    decisionSnapshot.tone,
+  ]);
 
   const criteriaTourSteps = useMemo(
     () => [
@@ -2685,7 +3142,7 @@ export default function Dashboard() {
               className={`topMainBtn ${topPageMode === "system" ? "active" : ""}`}
               onClick={() => switchTopPage("system")}
             >
-              Hệ thống
+              Chính sách & Kịch bản
             </button>
           </nav>
         </div>
@@ -3668,18 +4125,6 @@ export default function Dashboard() {
 
                 <div className="toggle">
                   <div className="tLeft">
-                    <div className="tTitle">Early warning</div>
-                    <div className="tDesc">Show/hide early warning card</div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={showEarlyWarningPanel}
-                    onChange={(e) => setShowEarlyWarningPanel(e.target.checked)}
-                  />
-                </div>
-
-                <div className="toggle">
-                  <div className="tLeft">
                     <div className="tTitle">Charts/history</div>
                     <div className="tDesc">Hourly chart + alerts history</div>
                   </div>
@@ -3701,7 +4146,6 @@ export default function Dashboard() {
                     setShowWeightsPanel(true);
                     setShowGridPanel(true);
                     setShowAiPanel(true);
-                    setShowEarlyWarningPanel(true);
                     setShowRightTabsPanel(true);
                   }}
                 >
@@ -3754,32 +4198,441 @@ export default function Dashboard() {
       ) : null}
 
       {topPageMode === "system" ? (
-        <div className="simplePage">
-          <div className="simplePageHead">
-            <h2>Hệ thống</h2>
-            <p>Trạng thái nhanh và thao tác điều hướng.</p>
-          </div>
-          <div className="systemGrid">
-            <div className="systemCard">
-              <span>OpenAQ</span>
-              <b>{openaqMapCount} trạm</b>
-            </div>
-            <div className="systemCard">
-              <span>AQICN</span>
-              <b>{aqicnMapCount} trạm</b>
-            </div>
-            <div className="systemCard">
-              <span>IQAir</span>
-              <b>{iqairMapCount} trạm</b>
-            </div>
-            <div className="systemCard">
-              <span>PurpleAir</span>
-              <b>{purpleAirMapCount} trạm</b>
+        <div className="simplePage systemPage systemPageMinimal">
+          <div className="systemHeaderBar">
+            <div className="systemHeaderHint">Thiết lập kịch bản nhanh và đọc kết quả ngay trong một màn hình tối giản.</div>
+            <div className="landingActionRow systemHeaderActions">
+              <button className="btn secondary" onClick={openMapWithTransition}>Mở dữ liệu bản đồ</button>
+              <button className="btn secondary" onClick={() => setSettingsOpen(true)}>Cài đặt layout</button>
             </div>
           </div>
-          <div className="landingActionRow">
-            <button className="btn" onClick={openMapWithTransition}>Mở Dữ liệu bản đồ</button>
-            <button className="btn secondary" onClick={() => setSettingsOpen(true)}>Cài đặt layout</button>
+
+          <div className="ahpPlaygroundCard systemMainCard systemActionZone">
+            <div className="systemConfigGrid">
+              <div className="systemControlRow">
+                <label style={{ fontSize: 12, color: "#374151" }}>
+                  Kịch bản
+                  <select
+                    className="input"
+                    style={{ width: 190 }}
+                    value={scenarioPresetName}
+                    onChange={(e) => applyScenarioPreset(e.target.value as ScenarioPresetName)}
+                  >
+                    {POLICY_SCENARIO_PRESETS.map((it) => (
+                      <option key={it.id} value={it.id}>
+                        {it.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="systemCheck">
+                  <input
+                    type="checkbox"
+                    checked={scenarioUseCustomWeights}
+                    onChange={(e) => setScenarioUseCustomWeights(e.target.checked)}
+                  />
+                  Tự chỉnh trọng số C1-C4
+                </label>
+
+                <label className="systemCheck">
+                  <input
+                    type="checkbox"
+                    checked={scenarioEarlyWarningEnabled}
+                    onChange={(e) => setScenarioEarlyWarningEnabled(e.target.checked)}
+                  />
+                  Bật cảnh báo sớm
+                </label>
+
+                <label style={{ fontSize: 12, color: "#374151" }}>
+                  Top ưu tiên
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={13}
+                    style={{ width: 92 }}
+                    value={scenarioTopN}
+                    onChange={(e) => setScenarioTopN(Number(e.target.value) || 5)}
+                  />
+                </label>
+
+                <div className="systemThresholdRow">
+                  <label style={{ fontSize: 12, color: "#374151" }}>
+                    Vàng
+                    <input
+                      className="input"
+                      type="number"
+                      min={0}
+                      max={1}
+                      step="0.01"
+                      style={{ width: 92 }}
+                      value={scenarioThresholds.yellow}
+                      onChange={(e) => updateScenarioThresholdCell("yellow", e.target.value)}
+                    />
+                  </label>
+                  <label style={{ fontSize: 12, color: "#374151" }}>
+                    Cam
+                    <input
+                      className="input"
+                      type="number"
+                      min={0}
+                      max={1}
+                      step="0.01"
+                      style={{ width: 92 }}
+                      value={scenarioThresholds.orange}
+                      onChange={(e) => updateScenarioThresholdCell("orange", e.target.value)}
+                    />
+                  </label>
+                  <label style={{ fontSize: 12, color: "#374151" }}>
+                    Đỏ
+                    <input
+                      className="input"
+                      type="number"
+                      min={0}
+                      max={1}
+                      step="0.01"
+                      style={{ width: 92 }}
+                      value={scenarioThresholds.red}
+                      onChange={(e) => updateScenarioThresholdCell("red", e.target.value)}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="systemPresetHint">{scenarioPresetDescription}</div>
+
+              {scenarioUseCustomWeights ? (
+                <div className="systemWeightRow">
+                  {AHP_LABELS.map((c) => (
+                    <label key={`scenario-weight-system-${c}`} style={{ fontSize: 12, color: "#374151" }}>
+                      {c}
+                      <input
+                        className="input"
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        style={{ width: 92 }}
+                        value={scenarioCustomWeights[c]}
+                        onChange={(e) => updateScenarioWeightCell(c, e.target.value)}
+                      />
+                    </label>
+                  ))}
+                  <div className="systemWeightSum">Tổng trọng số: <b>{scenarioWeightSum.toFixed(6)}</b></div>
+                </div>
+              ) : (
+                <div className="systemWeightRow systemWeightText">
+                  Trọng số áp dụng: <b>C1={POLICY_SCENARIO_PRESETS.find((x) => x.id === scenarioPresetName)?.weights.C1 ?? 0}</b>, <b>C2={POLICY_SCENARIO_PRESETS.find((x) => x.id === scenarioPresetName)?.weights.C2 ?? 0}</b>, <b>C3={POLICY_SCENARIO_PRESETS.find((x) => x.id === scenarioPresetName)?.weights.C3 ?? 0}</b>, <b>C4={POLICY_SCENARIO_PRESETS.find((x) => x.id === scenarioPresetName)?.weights.C4 ?? 0}</b>
+                </div>
+              )}
+
+              <div className="btnRow systemActionRow">
+                <button
+                  className="btn secondary"
+                  onClick={() => runPolicyScenarioNow(histDate)}
+                  disabled={scenarioLoading}
+                >
+                  {scenarioLoading ? "Đang chạy kịch bản..." : "So sánh gốc vs kịch bản"}
+                </button>
+                <button
+                  className="btn"
+                  onClick={openScenarioResultOnMap}
+                  disabled={!scenarioResult?.scenarioResult?.length}
+                >
+                  Tô bản đồ theo kịch bản
+                </button>
+              </div>
+
+              {scenarioErr ? <div className="ahpErrText">Lỗi kịch bản: {scenarioErr}</div> : null}
+            </div>
+          </div>
+
+          <div className="systemUtilityGrid">
+            <div className="ahpPlaygroundCard systemMainCard systemHistoryZone">
+              <div className="cardTitle">Charts/History theo dõi biến động dữ liệu</div>
+              <div className="systemHistoryHint">Theo dõi nhanh biểu đồ theo giờ, lịch sử cảnh báo và dữ liệu 13 quận theo ngày.</div>
+
+              <div className="tabs systemTabs">
+                <button className={`tab ${tab === "hourly" ? "active" : ""}`} onClick={() => setTab("hourly")}>
+                  Biểu đồ theo giờ
+                </button>
+                <button className={`tab ${tab === "alerts" ? "active" : ""}`} onClick={() => setTab("alerts")}>
+                  Lịch sử cảnh báo
+                </button>
+                <button className={`tab ${tab === "districts" ? "active" : ""}`} onClick={() => setTab("districts")}>
+                  13 quận (theo ngày)
+                </button>
+              </div>
+
+              <div className="systemHistoryBody">
+                {tab === "hourly" ? (
+                  <div className="chartBox systemChartBox">
+                    {dangChay && !hourly ? (
+                      <div style={{ color: "#6b7280", fontSize: 12 }}>Đang tải dữ liệu biểu đồ...</div>
+                    ) : hourly ? (
+                      <div style={{ height: 250, width: "100%" }}>
+                        <HourlyChart hourly={hourly} />
+                      </div>
+                    ) : (
+                      <div className="systemEmpty">
+                        Chưa có dữ liệu theo giờ. Bấm <b>Chạy DSS</b> để lấy dữ liệu mới nhất.
+                        <div className="btnRow" style={{ marginTop: 8 }}>
+                          <button className="btn secondary" onClick={() => chayDSS({ isManual: true })} disabled={dangChay}>
+                            {dangChay ? "Đang chạy..." : "Chạy DSS"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : tab === "alerts" ? (
+                  <div className="tableWrap alertsTableWrap systemTableScroll">
+                    {!alerts ? (
+                      <div style={{ padding: 10, fontSize: 12 }}>Đang tải...</div>
+                    ) : alerts.items?.length === 0 ? (
+                      <div style={{ padding: 10, fontSize: 12, color: "#6b7280" }}>Chưa có bản ghi cảnh báo.</div>
+                    ) : (
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Id</th>
+                            <th>Thời gian</th>
+                            <th>Lat</th>
+                            <th>Lon</th>
+                            <th>Điểm</th>
+                            <th>Mức</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {alerts.items.map((it: any) => {
+                            const st = levelStyle(it.Level);
+                            return (
+                              <tr key={it.Id}>
+                                <td>{it.Id}</td>
+                                <td>{it.CreatedAt}</td>
+                                <td>{it.Lat}</td>
+                                <td>{it.Lon}</td>
+                                <td>{it.Score}</td>
+                                <td>
+                                  <span className="badge" style={{ color: st.color, background: st.bg }}>
+                                    {it.Level}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                ) : (
+                  <div className="systemDistrictHistory">
+                    <div className="systemDistrictToolbar">
+                      <label style={{ fontSize: 12, color: "#374151" }}>
+                        Ngày:&nbsp;
+                        <input
+                          type="date"
+                          value={histDate}
+                          onChange={(e) => onHistDateChange(e.target.value)}
+                          style={{ padding: "6px 8px", borderRadius: 10, border: "1px solid #e5e7eb" }}
+                        />
+                      </label>
+                      <button className="btn secondary" onClick={() => loadDistrictDaily(histDate)} disabled={districtDailyLoading}>
+                        Xem
+                      </button>
+                      <button className="btn secondary" onClick={() => refreshDistrictDailyNow(histDate)} disabled={districtDailyLoading}>
+                        Lấy từ Open-Meteo & lưu
+                      </button>
+                    </div>
+
+                    {districtDailyErr ? (
+                      <div style={{ padding: 10, fontSize: 12, color: "#b91c1c" }}>{districtDailyErr}</div>
+                    ) : !districtDaily ? (
+                      <div className="systemEmpty">
+                        Chưa có dữ liệu theo quận cho ngày này. Bấm <b>Xem</b> hoặc <b>Lấy từ Open-Meteo & lưu</b>.
+                      </div>
+                    ) : districtDaily.items?.length === 0 ? (
+                      <div className="systemEmpty">Không có bản ghi cho ngày đang chọn.</div>
+                    ) : (
+                      <div className="tableWrap systemTableScroll">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Quận</th>
+                              <th>PM2.5</th>
+                              <th>PM10</th>
+                              <th>NO2</th>
+                              <th>O3</th>
+                              <th>CO</th>
+                              <th>Giờ dữ liệu</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {districtDaily.items.map((it) => (
+                              <tr key={`system-daily-${it.DistrictId}`}>
+                                <td>{it.DistrictName}</td>
+                                <td>{it.PM25 ?? it.PM25Avg ?? "—"}</td>
+                                <td>{it.PM10 ?? it.PM10Avg ?? "—"}</td>
+                                <td>{it.NO2 ?? it.NO2Avg ?? "—"}</td>
+                                <td>{it.O3 ?? it.O3Avg ?? "—"}</td>
+                                <td>{it.CO ?? it.COAvg ?? "—"}</td>
+                                <td>{it.HoursCount}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="ahpPlaygroundCard systemMainCard systemExportZone">
+              <div className="cardTitle">Kết quả xuất báo cáo từ dashboard</div>
+              <div className="systemExportHint">
+                Xuất nhanh báo cáo phục vụ thuyết minh hoặc gửi quản lý ngay từ dữ liệu dashboard hiện tại.
+              </div>
+
+              <div className="btnRow systemExportButtons">
+                <button className="btn" onClick={exportDashboardPdfReport} disabled={systemExportLoading}>
+                  {systemExportLoading ? "Đang xuất PDF..." : "Xuất báo cáo PDF (13 quận)"}
+                </button>
+                <button
+                  className="btn secondary"
+                  onClick={exportScenarioComparisonCsv}
+                  disabled={!scenarioCompareItems.length}
+                >
+                  Xuất so sánh kịch bản (.csv)
+                </button>
+                <button className="btn secondary" onClick={exportQuickDecisionReport}>
+                  Xuất nhanh (.txt)
+                </button>
+              </div>
+
+              {systemExportErr ? <div className="ahpErrText">Lỗi xuất báo cáo: {systemExportErr}</div> : null}
+
+              <div className="systemSummaryRow systemExportStats">
+                <div className="systemSummaryItem">
+                  Điểm DSS hiện tại: <b>{risk ? Number(risk.score_0_100).toFixed(2) : "—"}</b>
+                </div>
+                <div className="systemSummaryItem">
+                  Mức rủi ro: <b>{risk?.level || "Chưa có"}</b>
+                </div>
+                <div className="systemSummaryItem">
+                  Bản ghi cảnh báo: <b>{alerts?.items?.length ?? 0}</b>
+                </div>
+                <div className="systemSummaryItem">
+                  Dòng kịch bản: <b>{scenarioCompareItems.length}</b>
+                </div>
+              </div>
+
+              <div className="systemExportNote">
+                Mẹo: chạy lại DSS trước khi xuất để nội dung báo cáo đồng bộ với dữ liệu mới nhất.
+              </div>
+            </div>
+          </div>
+
+          <div className="ahpPlaygroundCard systemMainCard systemResultZone">
+            {scenarioResult ? (
+              <>
+                <div className="systemSummaryRow">
+                  <div className="systemSummaryItem">
+                    Top mặc định: <b>{scenarioResult.summary?.baselineTopDistrict?.districtName || "—"}</b>
+                  </div>
+                  <div className="systemSummaryItem">
+                    Top kịch bản: <b>{scenarioResult.summary?.scenarioTopDistrict?.districtName || "—"}</b>
+                  </div>
+                  <div className="systemSummaryItem">
+                    Biến động mạnh nhất: <b>{scenarioStrongestShift?.districtName || "—"}</b>
+                  </div>
+                  <div className="systemSummaryItem">
+                    Tăng/Giảm/Giữ: <b>{scenarioResult.summary?.upPriorityCount ?? 0} / {scenarioResult.summary?.downPriorityCount ?? 0} / {scenarioResult.summary?.stablePriorityCount ?? 0}</b>
+                  </div>
+                  <div className="systemSummaryItem systemSummaryWide">
+                    Kịch bản ưu tiên: <b>{scenarioPresetPriorityText}</b> · Nên xem trước: <b>{scenarioWatchList.length ? scenarioWatchList.join(", ") : "—"}</b>
+                    {scenarioDataBiasText ? ` · ${scenarioDataBiasText}` : ""}
+                  </div>
+                </div>
+
+                <div className="ahpResultTableWrap systemTableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Quận</th>
+                        <th>Hạng gốc</th>
+                        <th>Hạng kịch bản</th>
+                        <th>Ưu tiên theo kịch bản</th>
+                        <th>Đổi hạng</th>
+                        <th>Điểm gốc</th>
+                        <th>Điểm kịch bản</th>
+                        <th>Chênh lệch điểm</th>
+                        <th>Mức cảnh báo</th>
+                        <th>Loại rủi ro</th>
+                        <th>Khuyến nghị</th>
+                        <th>Lý do thay đổi</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scenarioCompareItems.map((it) => {
+                        const deltaRank = Number(it.rankDelta || 0);
+                        const deltaScore = Number(it.scoreDelta || 0);
+                        const rankTone = deltaRank < 0 ? "#065f46" : deltaRank > 0 ? "#991b1b" : "#374151";
+                        const scoreTone = deltaScore > 0 ? "#991b1b" : deltaScore < 0 ? "#065f46" : "#374151";
+                        const scenarioPriorityLabel = scenarioPriorityLabelByRank(Number(it.scenarioRank || 0), scenarioAppliedTopN);
+                        const priorityTone =
+                          scenarioPriorityLabel === "Rất cao"
+                            ? "#991b1b"
+                            : scenarioPriorityLabel === "Cao"
+                              ? "#b45309"
+                              : scenarioPriorityLabel === "Trung bình"
+                                ? "#1d4ed8"
+                                : "#374151";
+                        return (
+                          <tr key={`scenario-cmp-system-${it.districtId}`}>
+                            <td>{it.districtName}</td>
+                            <td>{it.baselineRank}</td>
+                            <td>{it.scenarioRank}</td>
+                            <td style={{ color: priorityTone, fontWeight: 700 }}>{scenarioPriorityLabel}</td>
+                            <td style={{ color: rankTone, fontWeight: 700 }}>{deltaRank > 0 ? `+${deltaRank}` : deltaRank}</td>
+                            <td>{toFixedOrDash(it.baselineScore, 6)}</td>
+                            <td>{toFixedOrDash(it.scenarioScore, 6)}</td>
+                            <td style={{ color: scoreTone, fontWeight: 700 }}>
+                              {deltaScore > 0 ? "+" : ""}
+                              {toFixedOrDash(deltaScore, 6)}
+                            </td>
+                            <td>
+                              <span className="badge" style={levelStyle(it.baselineLevel)}>{it.baselineLevel}</span> → <span className="badge" style={levelStyle(it.scenarioLevel)}>{it.scenarioLevel}</span>
+                            </td>
+                            <td>{it.riskType}</td>
+                            <td title={it.explanation || it.recommendation}>
+                              {compactScenarioRecommendation(
+                                String(it.scenarioLevel || ""),
+                                String(it.recommendation || ""),
+                                Boolean(it.earlyWarning),
+                                Number(it.scenarioRank || 0),
+                                scenarioAppliedTopN,
+                                deltaRank
+                              )}
+                            </td>
+                            <td title={it.rankChangeReason ? `${it.rankChangeReason}. ${it.explanation || ""}`.trim() : it.explanation || ""}>
+                              {buildScenarioReasonHint(
+                                scenarioPresetName,
+                                scenarioRowsByDistrictId.get(Number(it.districtId))?.criteriaValues,
+                                deltaRank,
+                                Number(it.scenarioRank || 0),
+                                scenarioAppliedTopN
+                              ) || it.rankChangeReason || "Điều chỉnh theo trọng số/ngưỡng kịch bản"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : (
+              <div className="systemEmpty">Chưa chạy kịch bản. Bấm “So sánh gốc vs kịch bản” để hiển thị bảng kết quả.</div>
+            )}
           </div>
         </div>
       ) : null}
@@ -3954,6 +4807,10 @@ export default function Dashboard() {
                 onPurpleAirStationsCountChange={setPurpleAirMapCount}
                 onSourcesStatusChange={(s) => setMapSourceStatuses(s)}
                 districtResultItems={districtResultPaint?.rows || null}
+                showSourcePanel={false}
+                selectedDistrictName={selectedMapDistrict}
+                districtDetailPanel={mapDistrictDetailPanel}
+                onClearDistrictPick={() => setSelectedMapDistrict("")}
                 onDistrictPick={(districtName) => setSelectedMapDistrict(String(districtName || "").trim())}
                 onPick={(newLat, newLon) => {
                   if (source === "station") {
@@ -3982,451 +4839,96 @@ export default function Dashboard() {
         {!focusMap && showRightPanel ? (
         <div className="right">
           <div className="rightScroll">
-          <div className={`card decisionCard tone-${decisionSnapshot.tone}`}>
-            <div className="cardTitle">Kết luận nhanh cho người ra quyết định</div>
-            <div className="decisionHeadline">{decisionSnapshot.headline}</div>
-            <div className="decisionMetaRow">
-              <span>Điểm DSS: <b>{decisionSnapshot.scoreText}</b></span>
-              <span>Mức: <b>{decisionSnapshot.levelText}</b></span>
-              {districtResultPaint ? (
-                <span>
-                  Ưu tiên AHP: <b>{currentDistrictDecisionContext?.priorityLabel || "Chưa xác định"}</b>
-                </span>
-              ) : null}
-            </div>
-            <div className="decisionReason">{decisionSnapshot.reason}</div>
-            <div style={{ marginTop: 8, fontSize: 12, color: "#334155" }}>
-              Kết luận này dựa trên điểm AHP hiện tại; AI hỗ trợ đọc xu hướng gần và khuyến nghị hành động.
-            </div>
-            {quickDecisionMessage ? (
-              <div className="criteriaInputNotice" style={{ marginBottom: 8 }}>
-                {quickDecisionMessage}
-                {currentDistrictDecisionContext ? (
-                  <span>
-                    {" "}
-                    (Hạng: <b>#{currentDistrictDecisionContext.rank}</b>, Điểm:{" "}
-                    <b>{toFixedOrDash(currentDistrictDecisionContext.score, 6)}</b>)
-                  </span>
-                ) : null}
+          <div className="rightActionBarSticky">
+            <button className="btn" onClick={() => chayDSS({ isManual: true })} disabled={dangChay}>
+              {dangChay ? "Đang chạy DSS..." : "Chạy DSS"}
+            </button>
+            <button
+              className="btn secondary"
+              onClick={() => {
+                setShowAiPanel(true);
+                setAiDrawerOpen(true);
+              }}
+            >
+              Mở AI Chat
+            </button>
+            <button className="btn secondary" onClick={exportQuickDecisionReport}>
+              Xuất báo cáo
+            </button>
+          </div>
+
+          <div className="rightSummaryChips">
+            {rightSummaryChips.map((chip) => (
+              <div key={`summary-chip-${chip.label}`} className="rightSummaryChip">
+                <span>{chip.label}</span>
+                <b>{chip.value}</b>
+              </div>
+            ))}
+          </div>
+
+          <div className={`card decisionCard rightAccordionCard tone-${decisionSnapshot.tone}`}>
+            <button
+              type="button"
+              className="rightAccordionHeader"
+              onClick={() => setAccordionDecisionOpen((v) => !v)}
+            >
+              <span>Kết luận nhanh cho người ra quyết định</span>
+              <span>{accordionDecisionOpen ? "▾" : "▸"}</span>
+            </button>
+            {accordionDecisionOpen ? (
+              <div className="rightAccordionBody">
+                <div className="decisionHeadline">{decisionSnapshot.headline}</div>
+                <div className="decisionMetaRow">
+                  <span>Điểm DSS: <b>{decisionSnapshot.scoreText}</b></span>
+                  <span>Mức: <b>{decisionSnapshot.levelText}</b></span>
+                  {districtResultPaint ? (
+                    <span>
+                      Ưu tiên AHP: <b>{currentDistrictDecisionContext?.priorityLabel || "Chưa xác định"}</b>
+                    </span>
+                  ) : null}
+                </div>
+                <div className="decisionMiniGrid">
+                  <div className="decisionMiniItem">
+                    <span>Quận ưu tiên</span>
+                    <b>
+                      {decisionSupportView.selectedDistrict}
+                      {decisionSupportView.selectedRank && decisionSupportView.selectedTotal
+                        ? ` (#${decisionSupportView.selectedRank}/${decisionSupportView.selectedTotal})`
+                        : ""}
+                    </b>
+                  </div>
+                  <div className="decisionMiniItem">
+                    <span>Cảnh báo gần nhất</span>
+                    <b>{decisionSupportView.horizonText}</b>
+                  </div>
+                  <div className="decisionMiniItem">
+                    <span>Độ tin cậy</span>
+                    <b>{decisionSupportView.confidenceText}</b>
+                  </div>
+                </div>
+
+                <div className="decisionActionLine">{decisionSupportView.operationalAction}</div>
+
+                <details className="decisionDetailToggle">
+                  <summary>Xem cơ sở tính</summary>
+                  <ul className="decisionSupportList">
+                    <li>{decisionSnapshot.reason}</li>
+                    <li>{decisionSnapshot.warningLine}</li>
+                    <li>{decisionSnapshot.sourceLine}</li>
+                    {quickDecisionMessage ? <li>{quickDecisionMessage}</li> : null}
+                    {decisionSupportView.staleForecast ? (
+                      <li>
+                        Forecast đang cũ/chưa mới, nên dùng kết quả AI như hỗ trợ vận hành và ưu tiên AHP hiện trạng.
+                      </li>
+                    ) : null}
+                  </ul>
+                </details>
               </div>
             ) : null}
-            <ul className="decisionList">
-              <li>{decisionSnapshot.action}</li>
-              <li>{decisionSnapshot.warningLine}</li>
-              <li>{decisionSnapshot.sourceLine}</li>
-            </ul>
-          </div>
-
-
-
-          <div className="card" style={{ marginTop: 6 }}>
-            <div className="cardTitle">Quận đang chọn theo AHP</div>
-            {currentDistrictDecisionContext ? (
-              <div style={{ display: "grid", gap: 6, fontSize: 12, color: "#374151" }}>
-                <div>
-                  Quận: <b>{currentDistrictDecisionContext.districtName}</b>
-                </div>
-                <div>
-                  Hạng AHP: <b>{currentDistrictDecisionContext.rank}/{currentDistrictDecisionContext.total}</b>
-                </div>
-                <div>
-                  Điểm tổng: <b>{toFixedOrDash(currentDistrictDecisionContext.score, 6)}</b>
-                </div>
-                <div>
-                  Ưu tiên AHP: <b>{currentDistrictDecisionContext.priorityLabel}</b>
-                </div>
-                <div>
-                  Tiêu chí nổi bật: <b>{selectedDistrictTopCriteriaText || "Chưa có dữ liệu C1-C4 chi tiết"}</b>
-                </div>
-                <div>
-                  Khuyến nghị: <b>{selectedDistrictRecommendation}</b>
-                </div>
-                {selectedDistrictScenarioContext ? (
-                  <div>
-                    Hạng kịch bản: <b>{selectedDistrictScenarioContext.scenarioRank}</b> · Đổi hạng:{" "}
-                    <b>{Number(selectedDistrictScenarioContext.rankDelta || 0) > 0 ? "+" : ""}{selectedDistrictScenarioContext.rankDelta}</b>
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <div style={{ fontSize: 12, color: "#6b7280" }}>
-                Bấm vào quận trên bản đồ để xem hạng AHP và khuyến nghị.
-              </div>
-            )}
-          </div>
-
-          {/* Cảnh báo sớm */}
-          {showEarlyWarningPanel ? (
-            <div className="card">
-              <div className="cardTitle">Nguy cơ ngắn hạn (AI hỗ trợ)</div>
-              <div style={{ fontSize: 12, color: "#334155", marginBottom: 8 }}>
-                AHP đánh giá hiện trạng; AI diễn giải và hỗ trợ nhận diện nguy cơ ngắn hạn theo dữ liệu gần.
-              </div>
-              <div className="decisionMetaRow" style={{ marginBottom: 8 }}>
-                <span>
-                  Trạng thái ngắn hạn: <b>{warning?.warning ? "Có tín hiệu cần chú ý" : "Chưa kích hoạt"}</b>
-                </span>
-                <span>
-                  Mức nguy cơ ngắn hạn: <b>{warning?.maxLevel || "—"}</b>
-                </span>
-                <span>
-                  Khung thời gian tham chiếu: <b>{warning?.timeOfMax || "—"}</b>
-                </span>
-              </div>
-              <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 8 }}>{earlyWarningSummaryText}</div>
-              {aiForecastFreshness.isStale ? (
-                <div
-                  style={{
-                    border: "1px solid #fca5a5",
-                    background: "#fef2f2",
-                    color: "#991b1b",
-                    borderRadius: 10,
-                    padding: "8px 10px",
-                    fontSize: 12,
-                    marginBottom: 8,
-                    lineHeight: 1.45,
-                  }}
-                >
-                  {aiForecastFreshness.message}
-                </div>
-              ) : null}
-              <button className="btn secondary" onClick={() => setShowEarlyWarningDetails((v) => !v)}>
-                {showEarlyWarningDetails ? "Ẩn chi tiết" : "Xem chi tiết"}
-              </button>
-              {showEarlyWarningDetails ? (
-                <div style={{ marginTop: 8 }}>
-                  <EarlyWarningCard
-                    data={warning}
-                    loading={dangChay}
-                    error={null}
-                    onCheck={() => chayDSS({ isManual: true })}
-                  />
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          <div className="ahpPlaygroundCard" style={{ marginTop: 6 }}>
-            <div className="ahpPlaygroundHead">
-              <div className="ahpPlaygroundTitle">Chính sách quyết định / Kịch bản</div>
-              <div className="ahpPlaygroundSub">
-                Chọn một kịch bản để xem thứ hạng quận thay đổi như thế nào so với cấu hình mặc định của hệ thống.
-              </div>
-            </div>
-
-            <div style={{ padding: "0 10px 10px", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <button className="btn secondary" onClick={() => setShowScenarioAdvanced((v) => !v)}>
-                {showScenarioAdvanced ? "Ẩn phân tích nâng cao" : "Phân tích nâng cao"}
-              </button>
-              {showScenarioAdvanced ? (
-                <button className="btn secondary" onClick={() => setShowScenarioGuide((v) => !v)}>
-                  {showScenarioGuide ? "Ẩn hướng dẫn" : "Xem hướng dẫn"}
-                </button>
-              ) : null}
-              <span style={{ fontSize: 12, color: "#6b7280" }}>
-                Scenario là lớp bổ sung để so sánh ưu tiên theo chính sách.
-              </span>
-            </div>
-            {showScenarioAdvanced ? (
-            <div style={{ display: "grid", gap: 8, padding: "0 10px 10px" }}>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                <label style={{ fontSize: 12, color: "#374151" }}>
-                  Kịch bản:&nbsp;
-                  <select
-                    className="input"
-                    style={{ width: 170 }}
-                    value={scenarioPresetName}
-                    onChange={(e) => applyScenarioPreset(e.target.value as ScenarioPresetName)}
-                  >
-                    {POLICY_SCENARIO_PRESETS.map((it) => (
-                      <option key={it.id} value={it.id}>
-                        {it.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label style={{ fontSize: 12, color: "#374151", display: "flex", alignItems: "center", gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={scenarioUseCustomWeights}
-                    onChange={(e) => setScenarioUseCustomWeights(e.target.checked)}
-                  />
-                  Tự chỉnh trọng số C1-C4
-                </label>
-                <label style={{ fontSize: 12, color: "#374151", display: "flex", alignItems: "center", gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={scenarioEarlyWarningEnabled}
-                    onChange={(e) => setScenarioEarlyWarningEnabled(e.target.checked)}
-                  />
-                  Bật cảnh báo sớm
-                </label>
-                <label style={{ fontSize: 12, color: "#374151" }}>
-                  Top ưu tiên:&nbsp;
-                  <input
-                    className="input"
-                    type="number"
-                    min={1}
-                    max={13}
-                    style={{ width: 72 }}
-                    value={scenarioTopN}
-                    onChange={(e) => setScenarioTopN(Number(e.target.value) || 5)}
-                  />
-                </label>
-              </div>
-              {showScenarioGuide ? (
-                <>
-                  <div className="criteriaInputNotice" style={{ marginTop: 2 }}>
-                    <b>Bạn đang làm gì ở đây?</b>
-                    <div style={{ marginTop: 4 }}>
-                      Chọn một kịch bản để xem quận nào sẽ được ưu tiên hơn so với cấu hình mặc định, từ đó quyết định nên theo dõi
-                      khu vực nào trước.
-                    </div>
-                  </div>
-                  <div className="criteriaInputNotice" style={{ marginTop: 2 }}>
-                    <b>Cách dùng nhanh</b>
-                    <div style={{ marginTop: 4 }}>Bước 1. Chọn Kịch bản hoặc tự chỉnh trọng số C1-C4.</div>
-                    <div>Bước 2. Bấm “So sánh gốc vs kịch bản” để xem quận nào tăng hoặc giảm ưu tiên.</div>
-                    <div>Bước 3. Dựa vào các cột “Ưu tiên theo kịch bản”, “Mức cảnh báo”, “Khuyến nghị” để chọn quận nên xem trước.</div>
-                  </div>
-                </>
-              ) : null}
-              <div className="criteriaInputNotice" style={{ marginTop: 2 }}>
-                {scenarioPresetDescription}
-              </div>
-
-              {scenarioUseCustomWeights ? (
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-                  {AHP_LABELS.map((c) => (
-                    <label key={`scenario-weight-${c}`} style={{ fontSize: 12, color: "#374151" }}>
-                      {c}
-                      <input
-                        className="input"
-                        type="number"
-                        step="0.01"
-                        min={0}
-                        style={{ width: 92 }}
-                        value={scenarioCustomWeights[c]}
-                        onChange={(e) => updateScenarioWeightCell(c, e.target.value)}
-                      />
-                    </label>
-                  ))}
-                  <div style={{ fontSize: 12, color: "#6b7280", paddingBottom: 8 }}>
-                    Tổng trọng số: <b>{scenarioWeightSum.toFixed(6)}</b>
-                  </div>
-                </div>
-              ) : (
-                <div className="criteriaInputNotice" style={{ marginTop: 2 }}>
-                  Trọng số kịch bản:{" "}
-                  <b>
-                    C1={POLICY_SCENARIO_PRESETS.find((x) => x.id === scenarioPresetName)?.weights.C1 ?? 0}, C2=
-                    {POLICY_SCENARIO_PRESETS.find((x) => x.id === scenarioPresetName)?.weights.C2 ?? 0}, C3=
-                    {POLICY_SCENARIO_PRESETS.find((x) => x.id === scenarioPresetName)?.weights.C3 ?? 0}, C4=
-                    {POLICY_SCENARIO_PRESETS.find((x) => x.id === scenarioPresetName)?.weights.C4 ?? 0}
-                  </b>
-                </div>
-              )}
-
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-                <label style={{ fontSize: 12, color: "#374151" }}>
-                  Vàng
-                  <input
-                    className="input"
-                    type="number"
-                    min={0}
-                    max={1}
-                    step="0.01"
-                    style={{ width: 92 }}
-                    value={scenarioThresholds.yellow}
-                    onChange={(e) => updateScenarioThresholdCell("yellow", e.target.value)}
-                  />
-                </label>
-                <label style={{ fontSize: 12, color: "#374151" }}>
-                  Cam
-                  <input
-                    className="input"
-                    type="number"
-                    min={0}
-                    max={1}
-                    step="0.01"
-                    style={{ width: 92 }}
-                    value={scenarioThresholds.orange}
-                    onChange={(e) => updateScenarioThresholdCell("orange", e.target.value)}
-                  />
-                </label>
-                <label style={{ fontSize: 12, color: "#374151" }}>
-                  Đỏ
-                  <input
-                    className="input"
-                    type="number"
-                    min={0}
-                    max={1}
-                    step="0.01"
-                    style={{ width: 92 }}
-                    value={scenarioThresholds.red}
-                    onChange={(e) => updateScenarioThresholdCell("red", e.target.value)}
-                  />
-                </label>
-                <span style={{ fontSize: 12, color: "#6b7280", paddingBottom: 8 }}>
-                  Mặc định: 0.45 / 0.65 / 0.80
-                </span>
-              </div>
-
-              <div className="btnRow">
-                <button
-                  className="btn secondary"
-                  title="Xem thứ hạng quận thay đổi thế nào khi đổi cách ưu tiên."
-                  onClick={() => runPolicyScenarioNow(histDate)}
-                  disabled={scenarioLoading}
-                >
-                  {scenarioLoading ? "Đang chạy kịch bản..." : "So sánh gốc vs kịch bản"}
-                </button>
-                <button
-                  className="btn"
-                  title="Hiển thị các quận nổi bật theo kịch bản đang chọn."
-                  onClick={openScenarioResultOnMap}
-                  disabled={!scenarioResult?.scenarioResult?.length}
-                >
-                  Tô bản đồ theo kịch bản
-                </button>
-              </div>
-
-              {scenarioErr ? <div className="ahpErrText">Lỗi kịch bản: {scenarioErr}</div> : null}
-              {scenarioResult ? (
-                <>
-                  <div className="criteriaInputNotice" style={{ marginTop: 4 }}>
-                    Top mặc định: <b>{scenarioResult.summary?.baselineTopDistrict?.districtName || "—"}</b> · Top theo kịch bản:{" "}
-                    <b>{scenarioResult.summary?.scenarioTopDistrict?.districtName || "—"}</b>
-                  </div>
-                  <div className="criteriaInputNotice">
-                    Thay đổi mạnh nhất:{" "}
-                    <b>
-                      {scenarioStrongestShift?.districtName || "—"}{" "}
-                      {scenarioStrongestShift ? `(${formatRankShiftForHuman(Number(scenarioStrongestShift.rankDelta || 0))})` : ""}
-                    </b>
-                    {" · "}
-                    Tăng/Giảm/Giữ nguyên:{" "}
-                    <b>
-                      {scenarioResult.summary?.upPriorityCount ?? 0} / {scenarioResult.summary?.downPriorityCount ?? 0} /{" "}
-                      {scenarioResult.summary?.stablePriorityCount ?? 0}
-                    </b>
-                  </div>
-                  <div className="criteriaInputNotice">
-                    Kịch bản hiện tại ưu tiên: <b>{scenarioPresetPriorityText}</b>
-                    {" · "}
-                    Nên xem trước: <b>{scenarioWatchList.length ? scenarioWatchList.join(", ") : "—"}</b>
-                    {scenarioDataBiasText ? ` · ${scenarioDataBiasText}` : ""}
-                  </div>
-                  <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
-                    Mức cảnh báo phản ánh hiện trạng ô nhiễm; ưu tiên theo kịch bản phản ánh mục tiêu ra quyết định đang chọn.
-                  </div>
-                  <div className="ahpResultTableWrap" style={{ marginTop: 8 }}>
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Quận</th>
-                          <th title="Thứ hạng theo cấu hình mặc định hiện tại">Hạng gốc</th>
-                          <th title="Thứ hạng theo cấu hình kịch bản đang chọn">Hạng kịch bản</th>
-                          <th title="Mức ưu tiên theo thứ hạng kịch bản (Top-N)">Ưu tiên theo kịch bản</th>
-                          <th title="Âm = ưu tiên tăng, dương = ưu tiên giảm">Đổi hạng</th>
-                          <th title="Điểm theo cấu hình mặc định">Điểm gốc</th>
-                          <th title="Điểm theo kịch bản">Điểm kịch bản</th>
-                          <th title="Chênh lệch điểm giữa kịch bản và gốc">Chênh lệch điểm</th>
-                          <th title="Mức cảnh báo môi trường trước và sau khi áp kịch bản">Mức cảnh báo</th>
-                          <th>Loại rủi ro</th>
-                          <th>Khuyến nghị</th>
-                          <th title="Giải thích nhanh vì sao thứ hạng thay đổi">Lý do thay đổi</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {scenarioCompareItems.map((it) => {
-                          const deltaRank = Number(it.rankDelta || 0);
-                          const deltaScore = Number(it.scoreDelta || 0);
-                          const rankTone = deltaRank < 0 ? "#065f46" : deltaRank > 0 ? "#991b1b" : "#374151";
-                          const scoreTone = deltaScore > 0 ? "#991b1b" : deltaScore < 0 ? "#065f46" : "#374151";
-                          const scenarioPriorityLabel = scenarioPriorityLabelByRank(Number(it.scenarioRank || 0), scenarioAppliedTopN);
-                          const priorityTone =
-                            scenarioPriorityLabel === "Rất cao"
-                              ? "#991b1b"
-                              : scenarioPriorityLabel === "Cao"
-                                ? "#b45309"
-                                : scenarioPriorityLabel === "Trung bình"
-                                  ? "#1d4ed8"
-                                  : "#374151";
-                          return (
-                            <tr key={`scenario-cmp-${it.districtId}`}>
-                              <td>{it.districtName}</td>
-                              <td>{it.baselineRank}</td>
-                              <td>{it.scenarioRank}</td>
-                              <td title={`Ưu tiên theo thứ hạng trong Top ${scenarioAppliedTopN}`} style={{ color: priorityTone, fontWeight: 700 }}>
-                                {scenarioPriorityLabel}
-                              </td>
-                              <td style={{ color: rankTone, fontWeight: 700 }}>
-                                {deltaRank > 0 ? `+${deltaRank}` : deltaRank}
-                              </td>
-                              <td>{toFixedOrDash(it.baselineScore, 6)}</td>
-                              <td>{toFixedOrDash(it.scenarioScore, 6)}</td>
-                              <td style={{ color: scoreTone, fontWeight: 700 }}>
-                                {deltaScore > 0 ? "+" : ""}
-                                {toFixedOrDash(deltaScore, 6)}
-                              </td>
-                              <td>
-                                <span className="badge" style={levelStyle(it.baselineLevel)}>
-                                  {it.baselineLevel}
-                                </span>{" "}
-                                →{" "}
-                                <span className="badge" style={levelStyle(it.scenarioLevel)}>
-                                  {it.scenarioLevel}
-                                </span>
-                              </td>
-                              <td>{it.riskType}</td>
-                              <td title={it.explanation || it.recommendation}>
-                                {compactScenarioRecommendation(
-                                  String(it.scenarioLevel || ""),
-                                  String(it.recommendation || ""),
-                                  Boolean(it.earlyWarning),
-                                  Number(it.scenarioRank || 0),
-                                  scenarioAppliedTopN,
-                                  deltaRank
-                                )}
-                              </td>
-                              <td
-                                title={
-                                  it.rankChangeReason
-                                    ? `${it.rankChangeReason}. ${it.explanation || ""}`.trim()
-                                    : it.explanation || ""
-                                }
-                              >
-                                {buildScenarioReasonHint(
-                                  scenarioPresetName,
-                                  scenarioRowsByDistrictId.get(Number(it.districtId))?.criteriaValues,
-                                  deltaRank,
-                                  Number(it.scenarioRank || 0),
-                                  scenarioAppliedTopN
-                                ) || it.rankChangeReason || "Điều chỉnh theo trọng số/ngưỡng kịch bản"}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              ) : (
-                <div style={{ fontSize: 12, color: "#6b7280" }}>
-                  Chưa chạy scenario. Baseline cũ vẫn hoạt động độc lập như trước.
-                </div>
-              )}
-            </div>
-            ) : (
-              <div style={{ fontSize: 12, color: "#6b7280", padding: "0 10px 10px" }}>
-                Scenario đang thu gọn để ưu tiên luồng quyết định chính. Bấm “Phân tích nâng cao” để mở.
-              </div>
-            )}
           </div>
 
           {showRightTabsPanel ? (
-          <details className="card collapsible rightTabs rightTabsPrimary" open>
+          <details className="card collapsible rightTabs rightTabsPrimary">
             <summary className="cardTitle">Charts / History</summary>
             <div className="collapsibleBody">
             <div className="tabs">

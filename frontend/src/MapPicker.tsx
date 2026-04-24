@@ -1,5 +1,5 @@
-﻿import { useEffect, useMemo, useState } from "react";
-import { Circle, GeoJSON, MapContainer, Marker, Popup, TileLayer, useMapEvents } from "react-leaflet";
+import { useEffect, useMemo, useState } from "react";
+import { Circle, GeoJSON, MapContainer, Marker, Popup, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import type { LatLngBoundsExpression, LatLngExpression } from "leaflet";
 import type { Feature, FeatureCollection, MultiPolygon, Point, Polygon as GeoPolygon } from "geojson";
 
@@ -10,6 +10,28 @@ export type DistrictMapResultItem = {
   districtName: string;
   rank: number;
   score: number;
+};
+
+export type DistrictMapForecastSummary = {
+  label: string;
+  rank?: number | null;
+  score?: number | null;
+  topDistrict?: string;
+  timeRef?: string;
+};
+
+export type DistrictMapDetail = {
+  districtName: string;
+  currentRank?: number | null;
+  currentTotal?: number | null;
+  currentScore?: number | null;
+  currentPriority?: string;
+  forecast1d?: DistrictMapForecastSummary | null;
+  forecast3d?: DistrictMapForecastSummary | null;
+  forecastLoading?: boolean;
+  forecastError?: string | null;
+  note?: string;
+  healthAdvice?: string[];
 };
 
 export type MapSourceStatus = {
@@ -36,6 +58,10 @@ type Props = {
   onPurpleAirStationsCountChange?: (n: number) => void;
   onSourcesStatusChange?: (statuses: Partial<Record<MapSourceStatus["source"], MapSourceStatus>>) => void;
   onDistrictPick?: (districtName: string) => void;
+  selectedDistrictName?: string;
+  districtDetailPanel?: DistrictMapDetail | null;
+  onClearDistrictPick?: () => void;
+  showSourcePanel?: boolean;
 };
 
 type DistrictBoundaryProps = {
@@ -47,29 +73,42 @@ type DistrictBoundaryProps = {
 
 type DistrictBoundaryFeature = Feature<GeoPolygon | MultiPolygon, DistrictBoundaryProps>;
 type DistrictBoundaryCollection = FeatureCollection<GeoPolygon | MultiPolygon, DistrictBoundaryProps>;
+type MaskFeatureCollection = FeatureCollection<GeoPolygon, Record<string, never>>;
 
 const DISTRICT_BORDER_COLORS = [
-  "#2563eb",
-  "#ef4444",
-  "#22c55e",
-  "#f59e0b",
-  "#a855f7",
-  "#06b6d4",
-  "#e11d48",
-  "#10b981",
-  "#f97316",
-  "#8b5cf6",
-  "#0ea5e9",
-  "#84cc16",
-  "#ec4899",
+  "#1d4eff",
+  "#ff2d2d",
+  "#10b95c",
+  "#ff9800",
+  "#9d4dff",
+  "#00aee8",
+  "#ff1f6b",
+  "#00bfa5",
+  "#ff6b00",
+  "#7a67ff",
+  "#00a0ff",
+  "#79c900",
+  "#ff3fa4",
 ];
 
 type BoundsTuple = [[number, number], [number, number]];
+type PanelPos = { left: number; top: number };
 
 const HCM_BOUNDS: BoundsTuple = [
   [10.33, 106.35],
   [11.17, 107.05],
 ];
+
+function hcmOuterRing() {
+  const [sw, ne] = HCM_BOUNDS;
+  return [
+    [sw[1], sw[0]],
+    [ne[1], sw[0]],
+    [ne[1], ne[0]],
+    [sw[1], ne[0]],
+    [sw[1], sw[0]],
+  ] as number[][];
+}
 
 function normalizeKey(v: string) {
   return String(v || "")
@@ -79,13 +118,17 @@ function normalizeKey(v: string) {
     .replace(/[^a-z0-9]/g, "");
 }
 
-function escapeHtml(v: string) {
-  return String(v || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+function extractDistrictNumber(text: string): number | null {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const normalized = raw
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  const m = normalized.match(/\b(?:q|quan|district)\s*\.?\s*(\d{1,2})\b/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
 }
 
 function toLevelStyle(level?: string) {
@@ -147,93 +190,20 @@ function closeRing(ring: number[][]): number[][] {
   return [...ring, [first[0], first[1]]];
 }
 
-function pointKey(p: number[], precision = 8) {
-  return `${Number(p[0]).toFixed(precision)},${Number(p[1]).toFixed(precision)}`;
-}
-
-function ringAbsArea(ring: number[][]) {
-  if (!ring.length) return 0;
-  let sum = 0;
-  for (let i = 0; i < ring.length - 1; i += 1) {
-    const p1 = ring[i];
-    const p2 = ring[i + 1];
-    sum += p1[0] * p2[1] - p2[0] * p1[1];
+function extractItemDistrictNumber(item: {
+  districtId?: number;
+  districtName: string;
+  aliases?: string[];
+}): number | null {
+  const byId = Number(item.districtId);
+  if (Number.isFinite(byId) && byId > 0) return byId;
+  const fromName = extractDistrictNumber(item.districtName);
+  if (fromName) return fromName;
+  for (const alias of item.aliases || []) {
+    const n = extractDistrictNumber(alias);
+    if (n) return n;
   }
-  return Math.abs(sum / 2);
-}
-
-function buildInnerCityOuterRing(features: DistrictBoundaryFeature[]): number[][] | null {
-  const edgeCount = new Map<string, number>();
-  const points = new Map<string, number[]>();
-
-  const edgeKey = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
-
-  for (const feature of features) {
-    const rings = extractOuterRings(feature.geometry).map((r) => closeRing(r)).filter((r) => r.length >= 4);
-    for (const ring of rings) {
-      for (let i = 0; i < ring.length - 1; i += 1) {
-        const p1 = ring[i];
-        const p2 = ring[i + 1];
-        const k1 = pointKey(p1);
-        const k2 = pointKey(p2);
-        if (!points.has(k1)) points.set(k1, [Number(k1.split(",")[0]), Number(k1.split(",")[1])]);
-        if (!points.has(k2)) points.set(k2, [Number(k2.split(",")[0]), Number(k2.split(",")[1])]);
-        const ek = edgeKey(k1, k2);
-        edgeCount.set(ek, (edgeCount.get(ek) || 0) + 1);
-      }
-    }
-  }
-
-  const adjacency = new Map<string, Set<string>>();
-  for (const [k, c] of edgeCount.entries()) {
-    if (c !== 1) continue;
-    const [a, b] = k.split("|");
-    if (!adjacency.has(a)) adjacency.set(a, new Set());
-    if (!adjacency.has(b)) adjacency.set(b, new Set());
-    adjacency.get(a)!.add(b);
-    adjacency.get(b)!.add(a);
-  }
-  if (!adjacency.size) return null;
-
-  const visited = new Set<string>();
-  const loops: number[][][] = [];
-
-  for (const [start, neighSet] of adjacency.entries()) {
-    for (const first of neighSet) {
-      const startEdge = edgeKey(start, first);
-      if (visited.has(startEdge)) continue;
-      visited.add(startEdge);
-
-      const keyLoop: string[] = [start];
-      let prev = start;
-      let curr = first;
-      let safe = 0;
-
-      while (safe < 20000) {
-        safe += 1;
-        keyLoop.push(curr);
-        if (curr === start) break;
-
-        const nextCandidates = [...(adjacency.get(curr) || [])].filter((k) => k !== prev);
-        if (!nextCandidates.length) break;
-        const next = nextCandidates.find((k) => !visited.has(edgeKey(curr, k))) ?? nextCandidates[0];
-        const ek = edgeKey(curr, next);
-        if (visited.has(ek) && next !== start) break;
-        visited.add(ek);
-        prev = curr;
-        curr = next;
-      }
-
-      if (keyLoop.length > 3 && keyLoop[0] === keyLoop[keyLoop.length - 1]) {
-        const ring = keyLoop.map((k) => points.get(k)).filter((p): p is number[] => Array.isArray(p));
-        if (ring.length >= 4) loops.push(closeRing(ring));
-      }
-    }
-  }
-
-  if (!loops.length) return null;
-  loops.sort((a, b) => ringAbsArea(b) - ringAbsArea(a));
-  return loops[0];
+  return null;
 }
 
 function bboxAround(lat: number, lon: number, km: number) {
@@ -290,6 +260,95 @@ function MapBoundsGuard({ focusBounds }: { focusBounds: BoundsTuple }) {
   return null;
 }
 
+function computeFeatureBounds(feature: DistrictBoundaryFeature): BoundsTuple | null {
+  let minLat = Infinity;
+  let minLon = Infinity;
+  let maxLat = -Infinity;
+  let maxLon = -Infinity;
+
+  for (const ring of extractOuterRings(feature.geometry)) {
+    for (const p of ring) {
+      const lon = Number(p[0]);
+      const lat = Number(p[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      minLat = Math.min(minLat, lat);
+      minLon = Math.min(minLon, lon);
+      maxLat = Math.max(maxLat, lat);
+      maxLon = Math.max(maxLon, lon);
+    }
+  }
+
+  if (!Number.isFinite(minLat) || !Number.isFinite(minLon) || !Number.isFinite(maxLat) || !Number.isFinite(maxLon)) {
+    return null;
+  }
+  return [
+    [minLat, minLon],
+    [maxLat, maxLon],
+  ];
+}
+
+function DistrictFocusController({
+  focusBounds,
+  focusTrigger,
+  rightPanelPx,
+}: {
+  focusBounds: BoundsTuple | null;
+  focusTrigger: number;
+  rightPanelPx: number;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    if (!focusBounds) return;
+    map.flyToBounds(focusBounds as unknown as LatLngBoundsExpression, {
+      animate: true,
+      duration: 0.55,
+      maxZoom: 13,
+      paddingTopLeft: [26, 24],
+      paddingBottomRight: [Math.max(90, rightPanelPx), 24],
+    });
+  }, [map, focusBounds, focusTrigger, rightPanelPx]);
+  return null;
+}
+
+function DistrictPanelAnchorController({
+  anchor,
+  panelWidth,
+  onPosition,
+}: {
+  anchor: [number, number] | null;
+  panelWidth: number;
+  onPosition: (next: PanelPos | null) => void;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    if (!anchor) {
+      onPosition(null);
+      return;
+    }
+    const update = () => {
+      const pt = map.latLngToContainerPoint([anchor[0], anchor[1]] as any);
+      const size = map.getSize();
+      const panelH = 360;
+      let left = pt.x + 44;
+      let top = pt.y - 150;
+      if (left + panelWidth > size.x - 10) left = pt.x - panelWidth - 44;
+      left = Math.max(10, Math.min(left, size.x - panelWidth - 10));
+      top = Math.max(10, Math.min(top, size.y - panelH - 10));
+      onPosition({ left, top });
+    };
+    update();
+    map.on("move", update);
+    map.on("zoom", update);
+    map.on("resize", update);
+    return () => {
+      map.off("move", update);
+      map.off("zoom", update);
+      map.off("resize", update);
+    };
+  }, [map, anchor, panelWidth, onPosition]);
+  return null;
+}
+
 export default function MapPicker({
   lat,
   lon,
@@ -305,6 +364,10 @@ export default function MapPicker({
   onPurpleAirStationsCountChange,
   onSourcesStatusChange,
   onDistrictPick,
+  selectedDistrictName,
+  districtDetailPanel,
+  onClearDistrictPick,
+  showSourcePanel = false,
 }: Props) {
   const circle = toLevelStyle(level);
 
@@ -321,6 +384,10 @@ export default function MapPicker({
   const [sourcePanelCollapsed, setSourcePanelCollapsed] = useState(false);
   const [districtBoundaries, setDistrictBoundaries] = useState<DistrictBoundaryFeature[]>([]);
   const [districtBoundaryErr, setDistrictBoundaryErr] = useState<string | null>(null);
+  const [focusDistrictBounds, setFocusDistrictBounds] = useState<BoundsTuple | null>(null);
+  const [focusTrigger, setFocusTrigger] = useState(0);
+  const [panelAnchor, setPanelAnchor] = useState<[number, number] | null>(null);
+  const [panelPos, setPanelPos] = useState<PanelPos | null>(null);
 
   const innerCityBounds = useMemo<BoundsTuple>(() => {
     if (!districtBoundaries.length) return HCM_BOUNDS;
@@ -505,38 +572,117 @@ export default function MapPicker({
         feature,
         districtName,
         key: normalizeKey(districtName),
+        districtId: Number(props.districtId || idx + 1),
+        aliases,
         borderColor,
         fillColor,
-        rankText: matched ? `#${matched.rank}` : "-",
-        scoreText: matched ? Number(matched.score || 0).toFixed(5) : "-",
       };
     });
   }, [districtBoundaries, districtResultItems, districtRowsByKey]);
 
-  const districtOutsideMaskFeature = useMemo(() => {
-    if (!districtBoundaryPaintItems.length) return null;
+  const selectedBoundaryItem = useMemo(() => {
+    const incoming = String(pickedDistrict || "").trim();
+    if (!incoming) return null;
+    const key = normalizeKey(incoming);
+    let matched = districtBoundaryPaintItems.find((it) => it.key === key) || null;
+    if (matched) return matched;
 
-    const [sw, ne] = HCM_BOUNDS;
-    const outerRing: number[][] = [
-      [sw[1], sw[0]],
-      [ne[1], sw[0]],
-      [ne[1], ne[0]],
-      [sw[1], ne[0]],
-      [sw[1], sw[0]],
-    ];
+    const wantedNo = extractDistrictNumber(incoming);
+    if (wantedNo) {
+      matched =
+        districtBoundaryPaintItems.find((it) => extractItemDistrictNumber(it) === wantedNo) ||
+        null;
+      if (matched) return matched;
+    }
 
-    const innerOuterRing = buildInnerCityOuterRing(districtBoundaryPaintItems.map((it) => it.feature));
-    if (!innerOuterRing || innerOuterRing.length < 4) return null;
+    matched =
+      districtBoundaryPaintItems.find((it) =>
+        [it.districtName, ...(it.aliases || [])].some((name) => normalizeKey(name) === key)
+      ) || null;
+    if (matched) return matched;
 
+    return null;
+  }, [pickedDistrict, districtBoundaryPaintItems]);
+
+  // Always dim outside the inner-city district polygons.
+  const outsideInnerCityMask = useMemo<MaskFeatureCollection | null>(() => {
+    if (!showDistrictLayer || !districtBoundaryPaintItems.length) return null;
+    const holes = districtBoundaryPaintItems
+      .flatMap((it) => extractOuterRings(it.feature.geometry))
+      .map(closeRing)
+      .filter((r) => r.length >= 4);
+    if (!holes.length) return null;
     return {
-      type: "Feature" as const,
-      properties: {},
-      geometry: {
-        type: "Polygon" as const,
-        coordinates: [outerRing, innerOuterRing],
-      },
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "Polygon",
+            coordinates: [hcmOuterRing(), ...holes],
+          },
+        },
+      ],
     };
-  }, [districtBoundaryPaintItems]);
+  }, [showDistrictLayer, districtBoundaryPaintItems]);
+
+  // Blur mask that keeps ONLY selected district bright:
+  // full HCM bounds as outer ring + selected district rings as holes.
+  const selectedDistrictBlurMask = useMemo<MaskFeatureCollection | null>(() => {
+    if (!showDistrictLayer || !selectedBoundaryItem) return null;
+    const holes = extractOuterRings(selectedBoundaryItem.feature.geometry).map(closeRing).filter((r) => r.length >= 4);
+    if (!holes.length) return null;
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "Polygon",
+            coordinates: [hcmOuterRing(), ...holes],
+          },
+        },
+      ],
+    };
+  }, [showDistrictLayer, selectedBoundaryItem]);
+
+  useEffect(() => {
+    const incoming = String(selectedDistrictName || "").trim();
+    if (!incoming) {
+      setPickedDistrict("");
+      setFocusDistrictBounds(null);
+      setPanelAnchor(null);
+      return;
+    }
+    const key = normalizeKey(incoming);
+    const wantedNo = extractDistrictNumber(incoming);
+    const matched =
+      districtBoundaryPaintItems.find((it) => it.key === key) ||
+      districtBoundaryPaintItems.find((it) =>
+        [it.districtName, ...(it.aliases || [])].some((name) => normalizeKey(name) === key)
+      ) ||
+      (wantedNo
+        ? districtBoundaryPaintItems.find((it) => extractItemDistrictNumber(it) === wantedNo)
+        : null) ||
+      null;
+    if (!matched) {
+      setPickedDistrict(incoming);
+      setFocusDistrictBounds(null);
+      setPanelAnchor(null);
+      return;
+    }
+    setPickedDistrict(matched.districtName);
+    const fb = computeFeatureBounds(matched.feature);
+    setFocusDistrictBounds(fb);
+    if (fb) {
+      const centerLat = (fb[0][0] + fb[1][0]) / 2;
+      const centerLon = (fb[0][1] + fb[1][1]) / 2;
+      setPanelAnchor([centerLat, centerLon]);
+    }
+    setFocusTrigger((v) => v + 1);
+  }, [selectedDistrictName, districtBoundaryPaintItems]);
 
   const topDistricts = useMemo(() => {
     return [...(districtResultItems || [])]
@@ -545,8 +691,13 @@ export default function MapPicker({
       .map((x) => x.districtName);
   }, [districtResultItems]);
 
+  // Keep the detail panel away from the selected district region.
+  // Anchoring the panel near the polygon center makes it "đè" lên quận và khó quan sát.
+  const useAnchoredDistrictPanel = false;
+
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      {showSourcePanel ? (
       <div className="mapSourcePanel">
         <div className="mapSourceHead">
           <b>Nguồn / Layer</b>
@@ -605,6 +756,78 @@ export default function MapPicker({
           </>
         ) : null}
       </div>
+      ) : null}
+
+      {districtDetailPanel && String(districtDetailPanel.districtName || "").trim() ? (
+        <div
+          className="mapDistrictDetailPanel"
+          style={
+            useAnchoredDistrictPanel && panelPos
+              ? {
+                  left: `${panelPos.left}px`,
+                  top: `${panelPos.top}px`,
+                  right: "auto",
+                  bottom: "auto",
+                  transform: "none",
+                }
+              : undefined
+          }
+        >
+          <div className="mapDistrictDetailHead">
+            <div>
+              <div className="mapDistrictDetailTitle">{districtDetailPanel.districtName}</div>
+              <div className="mapDistrictDetailSub">Chi tiết trực quan theo quận</div>
+            </div>
+            <button type="button" className="mapDistrictDetailClose" onClick={onClearDistrictPick}>
+              ×
+            </button>
+          </div>
+
+          <div className="mapDistrictDetailGrid">
+            <div>
+              Hạng hiện tại:{" "}
+              <b>
+                {districtDetailPanel.currentRank && districtDetailPanel.currentTotal
+                  ? `#${districtDetailPanel.currentRank}/${districtDetailPanel.currentTotal}`
+                  : "—"}
+              </b>
+            </div>
+            <div>
+              Điểm hiện tại: <b>{Number.isFinite(Number(districtDetailPanel.currentScore)) ? Number(districtDetailPanel.currentScore).toFixed(6) : "—"}</b>
+            </div>
+            <div>
+              Mức ưu tiên: <b>{districtDetailPanel.currentPriority || "—"}</b>
+            </div>
+          </div>
+
+          <div className="mapDistrictForecastWrap">
+            <div className="mapDistrictForecastCard">
+              <div className="mapDistrictForecastLabel">{districtDetailPanel.forecast1d?.label || "Dự báo 1 ngày tới"}</div>
+              <div>Hạng: <b>{districtDetailPanel.forecast1d?.rank ? `#${districtDetailPanel.forecast1d.rank}` : "—"}</b></div>
+              <div>Điểm: <b>{Number.isFinite(Number(districtDetailPanel.forecast1d?.score)) ? Number(districtDetailPanel.forecast1d?.score).toFixed(6) : "—"}</b></div>
+            </div>
+            <div className="mapDistrictForecastCard">
+              <div className="mapDistrictForecastLabel">{districtDetailPanel.forecast3d?.label || "Dự báo 3 ngày tới"}</div>
+              <div>Hạng: <b>{districtDetailPanel.forecast3d?.rank ? `#${districtDetailPanel.forecast3d.rank}` : "—"}</b></div>
+              <div>Điểm: <b>{Number.isFinite(Number(districtDetailPanel.forecast3d?.score)) ? Number(districtDetailPanel.forecast3d?.score).toFixed(6) : "—"}</b></div>
+            </div>
+          </div>
+
+          {districtDetailPanel.forecastLoading ? <div className="mapDistrictDetailHint">Đang cập nhật dự báo theo quận...</div> : null}
+          {districtDetailPanel.forecastError ? <div className="mapDistrictDetailWarn">{districtDetailPanel.forecastError}</div> : null}
+          {districtDetailPanel.note ? <div className="mapDistrictDetailNote">{districtDetailPanel.note}</div> : null}
+          {districtDetailPanel.healthAdvice?.length ? (
+            <div className="mapDistrictDetailHealth">
+              <div className="mapDistrictDetailHealthTitle">Lưu ý sức khỏe khi ra đường</div>
+              <ul>
+                {districtDetailPanel.healthAdvice.slice(0, 4).map((line, idx) => (
+                  <li key={`health-note-${idx}`}>{line}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <MapContainer
         center={center}
@@ -620,16 +843,54 @@ export default function MapPicker({
 
         <ClickHandler onPick={onPick} bounds={innerCityBounds} />
         <MapBoundsGuard focusBounds={innerCityBounds} />
+        <DistrictFocusController
+          focusBounds={focusDistrictBounds}
+          focusTrigger={focusTrigger}
+          rightPanelPx={districtDetailPanel ? 360 : 100}
+        />
+        {useAnchoredDistrictPanel ? (
+          <DistrictPanelAnchorController
+            anchor={panelAnchor}
+            panelWidth={340}
+            onPosition={(next) =>
+              setPanelPos((prev) => {
+                if (!next) return null;
+                if (!prev) return next;
+                if (Math.abs(prev.left - next.left) < 1 && Math.abs(prev.top - next.top) < 1) return prev;
+                return next;
+              })
+            }
+          />
+        ) : null}
         <RiskGridLayer geojson={grid ?? null} />
 
-        {showDistrictLayer && districtOutsideMaskFeature ? (
+        {(selectedDistrictBlurMask || outsideInnerCityMask) ? (
           <GeoJSON
-            data={districtOutsideMaskFeature}
+            data={(selectedDistrictBlurMask || outsideInnerCityMask) as any}
             style={{
+              stroke: false,
               color: "transparent",
+              opacity: 0,
               weight: 0,
+              fillRule: "evenodd",
               fillColor: "#6b7280",
-              fillOpacity: 0.66,
+              fillOpacity: selectedDistrictBlurMask ? 0.50 : 0.42,
+              interactive: false,
+            }}
+          />
+        ) : null}
+
+        {showDistrictLayer && selectedBoundaryItem ? (
+          <GeoJSON
+            key={`district-selected-halo-${selectedBoundaryItem.key}`}
+            data={selectedBoundaryItem.feature as DistrictBoundaryFeature}
+            style={{
+              className: "district-selected-halo",
+              color: "#f59e0b",
+              weight: 9,
+              opacity: 0.46,
+              fillColor: "rgba(245, 158, 11, 0.10)",
+              fillOpacity: 0.14,
               interactive: false,
             }}
           />
@@ -637,25 +898,49 @@ export default function MapPicker({
 
         {showDistrictLayer
           ? districtBoundaryPaintItems.map((it) => {
-              const selected = normalizeKey(pickedDistrict) === it.key;
-              const popupHtml = `<div style="min-width:170px"><div><b>${escapeHtml(it.districtName)}</b></div><div>Hạng: ${escapeHtml(it.rankText)}</div><div>Điểm: ${escapeHtml(it.scoreText)}</div></div>`;
+              const hasSelected = Boolean(String(pickedDistrict || "").trim());
+              const selected = !!selectedBoundaryItem && selectedBoundaryItem.key === it.key;
               return (
                 <GeoJSON
                   key={`district-geo-${it.key}`}
                   data={it.feature as DistrictBoundaryFeature}
                   style={{
-                    color: it.borderColor,
-                    weight: selected ? 3.4 : 2.2,
-                    fillColor: it.fillColor,
-                    fillOpacity: 0.52,
+                    className: selected ? "district-selected-stroke" : "district-stroke-strong",
+                    color: selected ? "#ea580c" : it.borderColor,
+                    weight: selected ? 6.4 : hasSelected ? 2.9 : 3.0,
+                    // Keep selected district bright; dimming is handled by the global mask.
+                    fillColor: hasSelected ? (selected ? "rgba(251, 146, 60, 0.18)" : "rgba(255, 255, 255, 0)") : it.fillColor,
+                    fillOpacity: hasSelected ? (selected ? 0.26 : 0) : 0.56,
+                    opacity: selected ? 1 : hasSelected ? 1 : 0.94,
                   }}
                   onEachFeature={(_, layer) => {
                     layer.bindTooltip(it.districtName, { sticky: true, direction: "top" });
-                    layer.bindPopup(popupHtml);
+                    if (selected) layer.bringToFront();
                   }}
                   eventHandlers={{
-                    click: () => {
+                    click: (e: any) => {
+                      e?.originalEvent?.stopPropagation?.();
                       setPickedDistrict(it.districtName);
+                      const b = e?.target?.getBounds?.();
+                      if (b && typeof b.getSouth === "function") {
+                        setFocusDistrictBounds([
+                          [Number(b.getSouth()), Number(b.getWest())],
+                          [Number(b.getNorth()), Number(b.getEast())],
+                        ]);
+                        const c = b.getCenter?.();
+                        if (c) {
+                          setPanelAnchor([Number(c.lat), Number(c.lng)]);
+                        }
+                      } else {
+                        const fb = computeFeatureBounds(it.feature);
+                        setFocusDistrictBounds(fb);
+                        if (fb) {
+                          const centerLat = (fb[0][0] + fb[1][0]) / 2;
+                          const centerLon = (fb[0][1] + fb[1][1]) / 2;
+                          setPanelAnchor([centerLat, centerLon]);
+                        }
+                      }
+                      setFocusTrigger((v) => v + 1);
                       onDistrictPick?.(it.districtName);
                     },
                   }}

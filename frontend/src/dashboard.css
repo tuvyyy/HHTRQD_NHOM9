@@ -286,9 +286,17 @@
   flex: 1;
   min-height: 0;
   border-radius: 16px;
-  overflow: hidden;
+  /* Allow Leaflet popups/tooltips to render outside the frame.
+     Clipping popups here causes "popup bị che khuất" even with high z-index. */
+  overflow: visible;
   border: 1px solid var(--border);
   position: relative;
+}
+
+/* Popups should sit above local UI overlays. */
+.mapFrame .leaflet-pane.leaflet-popup-pane,
+.mapFrame .leaflet-pane.leaflet-tooltip-pane {
+  z-index: 1200;
 }
 
 /* Legend overlay bottom-left */
@@ -720,7 +728,7 @@ th{
 .main.cols2l { grid-template-columns: minmax(320px, 38%) 1fr; }
 .main.cols2r { grid-template-columns: 1fr minmax(360px, 38%); }
 .main.cols3 { grid-template-columns: minmax(300px, 31%) minmax(500px, 39%) minmax(380px, 30%); }
-.main.colsMap4060 { grid-template-columns: minmax(320px, 45%) minmax(420px, 55%); }
+.main.colsMap4060 { grid-template-columns: minmax(420px, 50%) minmax(420px, 50%); }
 
 .topGuideBtn,
 .topRunBtn,
@@ -878,6 +886,107 @@ th{
   padding-right: 2px;
 }
 
+.rightActionBarSticky {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px;
+  border: 1px solid #d8e5ff;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(5px);
+}
+
+.rightFocusSwitcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #dbe4f5;
+  border-radius: 12px;
+  background: #f8faff;
+  padding: 5px;
+}
+
+.rightFocusBtn {
+  border: 1px solid transparent;
+  background: transparent;
+  color: #334155;
+  border-radius: 9px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.rightFocusBtn.active {
+  border-color: #9ebeff;
+  background: #e8f0ff;
+  color: #1d4ed8;
+}
+
+.rightSummaryChips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rightSummaryChip {
+  border: 1px solid #dbe5f7;
+  background: #f8fbff;
+  border-radius: 10px;
+  padding: 6px 9px;
+  display: grid;
+  gap: 2px;
+  min-width: 128px;
+}
+
+.rightSummaryChip span {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.rightSummaryChip b {
+  font-size: 12px;
+  color: #1f2937;
+}
+
+.rightAccordionCard {
+  padding-top: 8px;
+}
+
+.rightAccordionHeader {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0 2px;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.rightAccordionBody {
+  margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.rightDistrictForecastRow {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 12px;
+}
+
 .decisionHeadline {
   font-size: 21px;
   line-height: 1.3;
@@ -905,6 +1014,89 @@ th{
   font-size: 13px;
   display: grid;
   gap: 4px;
+}
+
+.decisionMiniGrid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.decisionMiniItem {
+  border: 1px solid #dbe5f7;
+  background: #f8fbff;
+  border-radius: 10px;
+  padding: 7px 9px;
+  display: grid;
+  gap: 2px;
+}
+
+.decisionMiniItem span {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.decisionMiniItem b {
+  font-size: 12px;
+  color: #0f172a;
+  line-height: 1.25;
+}
+
+.decisionActionLine {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #1f2937;
+  font-weight: 700;
+}
+
+.decisionDetailToggle {
+  margin-top: 8px;
+  border: 1px dashed #cdd9ef;
+  border-radius: 10px;
+  background: #fbfdff;
+  padding: 6px 8px;
+}
+
+.decisionDetailToggle > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  color: #1d4ed8;
+}
+
+.decisionDetailToggle .decisionSupportList {
+  margin-top: 6px;
+}
+
+.decisionSupportBox {
+  margin-top: 10px;
+  border: 1px solid #dbe6f8;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 8px 10px;
+}
+
+.decisionSupportTitle {
+  font-size: 13px;
+  font-weight: 900;
+  color: #1e3a8a;
+  margin-bottom: 6px;
+}
+
+.decisionSupportList {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: #334155;
+  display: grid;
+  gap: 4px;
+}
+
+@media (max-width: 1024px) {
+  .decisionMiniGrid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .ahpPlaygroundHead {
@@ -1509,10 +1701,281 @@ th{
   background: #fff;
   box-shadow: var(--shadow);
   padding: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .simplePageHead {
   margin-bottom: 10px;
+}
+
+.systemPage {
+  width: 100%;
+  margin: 10px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  padding: 10px 12px 12px;
+}
+
+.systemPageMinimal {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  padding: 10px 0 0;
+}
+
+.systemHeaderBar {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0 6px;
+}
+
+.systemHeaderHint {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.systemHeaderActions {
+  margin-top: 0;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.systemMainCard {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border-radius: 10px;
+  box-shadow: none;
+  border-color: #e5e7eb;
+  overflow: hidden;
+}
+
+.systemConfigCard {
+  background: #f2f6ff;
+}
+
+.systemConfigGrid {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.systemControlRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.systemCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #334155;
+}
+
+.systemThresholdRow {
+  display: inline-flex;
+  gap: 8px;
+  align-items: flex-end;
+  margin-left: auto;
+}
+
+.systemPresetHint {
+  border: 1px solid #d8e4ff;
+  background: #eef4ff;
+  color: #334155;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.systemWeightRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.systemWeightText {
+  font-size: 12px;
+  color: #374151;
+}
+
+.systemWeightSum {
+  font-size: 12px;
+  color: #6b7280;
+  padding-bottom: 8px;
+}
+
+.systemActionRow {
+  margin-top: 0;
+}
+
+.systemSummaryRow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.systemSummaryItem {
+  border: 1px solid #eef0f4;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #334155;
+  line-height: 1.4;
+}
+
+.systemSummaryWide {
+  grid-column: 1 / -1;
+}
+
+.systemTableWrap {
+  flex: 1;
+  min-height: 0;
+  background: #fff;
+}
+
+.systemEmpty {
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+  color: #6b7280;
+  background: #fafafa;
+}
+
+.systemActionZone {
+  flex: 0 0 auto;
+  border-color: #d8e4ff;
+  background: #f2f6ff;
+  order: 1;
+}
+
+.systemResultZone {
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: 52vh;
+  border-color: #e5e7eb;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  overflow: hidden;
+  order: 2;
+}
+
+.systemUtilityGrid {
+  flex: 0 0 auto;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 8px;
+  order: 3;
+  align-items: start;
+}
+
+.systemHistoryZone,
+.systemExportZone {
+  border-color: #e5e7eb;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px;
+}
+
+.systemHistoryHint,
+.systemExportHint {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.systemTabs {
+  margin-top: 8px;
+  margin-bottom: 8px;
+}
+
+.systemHistoryBody {
+  min-height: 300px;
+  max-height: 44vh;
+  overflow: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 8px;
+  background: #fff;
+}
+
+.systemChartBox {
+  height: 280px;
+  border-radius: 10px;
+}
+
+.systemTableScroll {
+  max-height: 34vh;
+  overflow: auto;
+}
+
+.systemResultZone .systemTableWrap {
+  max-height: 34vh;
+  overflow: auto;
+}
+
+.systemDistrictHistory {
+  display: grid;
+  gap: 8px;
+}
+
+.systemDistrictToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.systemExportButtons {
+  margin-top: 10px;
+}
+
+.systemExportStats {
+  margin-top: 8px;
+}
+
+.systemExportNote {
+  margin-top: 8px;
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  background: #fafafa;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.systemMainCard .ahpResultTableWrap,
+.systemMainCard .btnRow,
+.systemMainCard .ahpErrText,
+.systemMainCard .systemPresetHint {
+  grid-column: 1 / -1;
+}
+
+.systemPageMinimal .btn {
+  border-radius: 10px;
 }
 
 .newsGrid,
@@ -1563,6 +2026,37 @@ th{
 @media (max-width: 1440px) {
   .main.cols3 { grid-template-columns: minmax(280px, 34%) minmax(440px, 36%) minmax(340px, 30%); }
   .leftAirMetaGrid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+
+  .systemPage {
+    padding: 12px;
+  }
+
+  .systemHeaderBar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .systemThresholdRow {
+    margin-left: 0;
+  }
+
+  .systemSummaryRow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .systemUtilityGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .systemHistoryBody {
+    max-height: 40vh;
+  }
+
+  .systemResultZone {
+    max-height: none;
+  }
+
+  .systemHeaderHint { font-size: 11px; }
 }
 
 /* ===============================
@@ -1733,7 +2227,7 @@ th{
 }
 
 .main.colsMap4060.map-focus-layout {
-  grid-template-columns: minmax(520px, 45%) minmax(420px, 55%);
+  grid-template-columns: minmax(520px, 50%) minmax(520px, 50%);
   grid-template-rows: auto minmax(0, 1fr);
   align-items: stretch;
 }
@@ -1945,6 +2439,24 @@ th{
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72), 0 16px 30px rgba(30, 64, 175, 0.14);
 }
 
+.mapFrame .district-stroke-strong {
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  filter: saturate(1.22) brightness(1.1);
+}
+
+.mapFrame .district-selected-halo {
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 5px rgba(245, 158, 11, 0.45));
+}
+
+.mapFrame .district-selected-stroke {
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 5px rgba(234, 88, 12, 0.5));
+}
+
 .mapSourcePanel {
   position: absolute;
   top: 72px;
@@ -1959,6 +2471,141 @@ th{
   display: grid;
   gap: 7px;
   pointer-events: auto;
+}
+
+.mapDistrictDetailPanel {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 920;
+  width: min(340px, calc(100% - 24px));
+  border: 1px solid #c7d8fb;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.2);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.mapDistrictDetailHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mapDistrictDetailTitle {
+  font-size: 18px;
+  line-height: 1.15;
+  font-weight: 900;
+  color: #0f172a;
+}
+
+.mapDistrictDetailSub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #475569;
+}
+
+.mapDistrictDetailClose {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid #d6e0f2;
+  background: #f8fbff;
+  color: #334155;
+  font-size: 16px;
+  line-height: 1;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.mapDistrictDetailGrid {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #1e293b;
+}
+
+.mapDistrictForecastWrap {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.mapDistrictForecastCard {
+  border: 1px solid #dbe5f6;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: #334155;
+}
+
+.mapDistrictForecastLabel {
+  font-size: 11px;
+  font-weight: 800;
+  color: #1d4ed8;
+}
+
+.mapDistrictDetailHint {
+  border: 1px solid #c7d2fe;
+  border-radius: 9px;
+  background: #eef2ff;
+  color: #3730a3;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+
+.mapDistrictDetailWarn {
+  border: 1px solid #fecaca;
+  border-radius: 9px;
+  background: #fef2f2;
+  color: #991b1b;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+
+.mapDistrictDetailNote {
+  border: 1px solid #d9e6ff;
+  border-radius: 10px;
+  background: #f6f9ff;
+  color: #0f172a;
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.mapDistrictDetailHealth {
+  border: 1px solid #dbe5f7;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 8px;
+}
+
+.mapDistrictDetailHealthTitle {
+  font-size: 12px;
+  font-weight: 800;
+  color: #1e3a8a;
+  margin-bottom: 4px;
+}
+
+.mapDistrictDetailHealth ul {
+  margin: 0;
+  padding-left: 16px;
+  display: grid;
+  gap: 4px;
+}
+
+.mapDistrictDetailHealth li {
+  font-size: 12px;
+  color: #1f2937;
+  line-height: 1.35;
 }
 
 .mapSourceHead {
@@ -2070,6 +2717,14 @@ th{
     width: min(230px, calc(100% - 20px));
     top: 66px;
     right: 10px;
+  }
+
+  .mapDistrictDetailPanel {
+    width: min(310px, calc(100% - 20px));
+    right: 10px;
+    top: auto;
+    bottom: 10px;
+    transform: none;
   }
 }
 

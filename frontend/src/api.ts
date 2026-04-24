@@ -479,4 +479,66 @@ export async function runDistrictPolicyScenario(payload: {
   return res.data as DistrictPolicyScenarioResponse;
 }
 
+export type DistrictForecastRankingItem = {
+  districtId?: number;
+  districtName: string;
+  rank: number;
+  score: number;
+  C1?: number;
+  C2?: number;
+  C3?: number;
+  C4?: number;
+  forecastHoursUsed?: number;
+  maxForecastScore?: number;
+  avgForecastScore?: number;
+  hoursAboveThreshold?: number;
+  latestForecastTime?: string;
+  [k: string]: any;
+};
+
+export type DistrictForecastRankingResponse = {
+  horizonHours: number;
+  threshold: number;
+  count: number;
+  topN: number;
+  topItems: DistrictForecastRankingItem[];
+  items: DistrictForecastRankingItem[];
+  criteriaRows?: Array<Record<string, any>>;
+  diagnostics?: Array<Record<string, any>>;
+  [k: string]: any;
+};
+
+export async function getDistrictForecastRanking(payload: {
+  horizon_hours?: number;
+  threshold?: number;
+  topN?: number;
+}) {
+  const res = await api.post("/api/district/forecast-ranking", payload, {
+    timeout: 90000,
+  });
+  const raw = (res.data || {}) as DistrictForecastRankingResponse;
+  const normalizeItem = (it: any): DistrictForecastRankingItem => ({
+    ...it,
+    districtId: Number(it?.districtId ?? it?.DistrictId ?? 0) || undefined,
+    districtName: String(it?.districtName ?? it?.DistrictName ?? ""),
+    rank: Number(it?.rank ?? it?.Rank ?? 0),
+    score: Number(it?.score ?? it?.AHPScore ?? it?.Score ?? 0),
+    C1: Number(it?.C1 ?? 0),
+    C2: Number(it?.C2 ?? 0),
+    C3: Number(it?.C3 ?? 0),
+    C4: Number(it?.C4 ?? 0),
+    forecastHoursUsed: Number(it?.forecastHoursUsed ?? it?.ForecastHoursUsed ?? 0) || undefined,
+    maxForecastScore: Number(it?.maxForecastScore ?? it?.MaxForecastScore ?? 0) || undefined,
+    avgForecastScore: Number(it?.avgForecastScore ?? it?.AvgForecastScore ?? 0) || undefined,
+    hoursAboveThreshold: Number(it?.hoursAboveThreshold ?? it?.HoursAboveThreshold ?? 0) || undefined,
+    latestForecastTime: String(it?.latestForecastTime ?? it?.LatestForecastTime ?? ""),
+  });
+
+  return {
+    ...raw,
+    topItems: Array.isArray(raw.topItems) ? raw.topItems.map(normalizeItem) : [],
+    items: Array.isArray(raw.items) ? raw.items.map(normalizeItem) : [],
+  } as DistrictForecastRankingResponse;
+}
+
 

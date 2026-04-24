@@ -130,6 +130,7 @@ export default function AiChatPanel({
         ranking_source: rankingSource,
         district_rows: normalizedRows,
         forecast_series: (forecastSeries || []).slice(0, 72),
+        provider: "grounded",
       });
 
       setMessages((prev) => [...prev, { role: "assistant", content: res.reply }]);
